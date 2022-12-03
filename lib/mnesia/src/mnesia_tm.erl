@@ -207,10 +207,17 @@ unblock_tab(Tab) ->
 
 doit_loop(#state{coordinators=Coordinators,participants=Participants,supervisor=Sup}=State) ->
     receive
-	{_From, {async_dirty, Tid, Commit, Tab}} ->
+	{From, {async_dirty, Tid, Commit, Tab}} ->
 	    case lists:member(Tab, State#state.blocked_tabs) of
 		false ->
-		    do_async_dirty(Tid, new_cr_format(Commit), Tab),
+            io:format("received async_dirty: ~p~n", [{From, {async_dirty, Tid, Commit, Tab}}]),
+            case mnesia_crdt:check_ts(Commit) of
+                true -> 
+                    mnesia_crdt:add_op(Commit),
+                    do_async_dirty(Tid, new_cr_format(Commit), Tab);
+                false -> 
+                    io:format("skipping this out of date record: ~p~n", [Commit])
+            end,
 		    doit_loop(State);
 		true ->
 		    Item = {async_dirty, Tid, new_cr_format(Commit), Tab},
@@ -1241,7 +1248,9 @@ prepare_items(Tid, Tab, Key, Items, Prep) ->
 
 do_prepare_items(Tid, Tab, Key, Types, Snmp, Items, Recs) ->
     Recs2 = prepare_snmp(Tid, Tab, Key, Types, Snmp, Items, Recs), % May exit
-    prepare_nodes(Tid, Types, Items, Recs2, normal).
+    Recs3 = prepare_nodes(Tid, Types, Items, Recs2, normal),
+    prepare_ts(Recs3).
+
 
 
 needs_majority(Tab, #prep{majority = M}) ->
@@ -1315,6 +1324,12 @@ prepare_nodes(Tid, [{Node, Storage} | Rest], Items, C, Kind) ->
     [Rec2 | prepare_nodes(Tid, Rest, Items, C2, Kind)];
 prepare_nodes(_Tid, [], _Items, CommitRecords, _Kind) ->
     CommitRecords.
+
+prepare_ts([Hd | Tl]) ->
+    Ts = erlang:system_time(),
+    Commit = Hd#commit{ts = Ts},
+    [Commit | prepare_ts(Tl)];
+prepare_ts([]) -> [].
 
 pick_node(Tid, Node, [Rec | Rest], Done) ->
     if
@@ -1998,17 +2013,21 @@ async_send_dirty(Tid, Nodes, Tab, ReadNode) ->
     async_send_dirty(Tid, Nodes, Tab, ReadNode, [], ok).
 
 async_send_dirty(Tid, [Head | Tail], Tab, ReadNode, WaitFor, Res) ->
+    % io:format("async_send_dirty: ~p, ReadNode ~p~n", [Rec, ReadNode]),
     Node = Head#commit.node,
     if
 	ReadNode == Node, Node == node() ->
 	    NewRes =  do_dirty(Tid, Head),
+        mnesia_crdt:add_op(Head),
 	    async_send_dirty(Tid, Tail, Tab, ReadNode, WaitFor, NewRes);
 	ReadNode == Node ->
 	    {?MODULE, Node} ! {self(), {sync_dirty, Tid, Head, Tab}},
 	    NewRes = {'EXIT', {aborted, {node_not_running, Node}}},
 	    async_send_dirty(Tid, Tail, Tab, ReadNode, [Node | WaitFor], NewRes);
 	true ->
-	    {?MODULE, Node} ! {self(), {async_dirty, Tid, Head, Tab}},
+        spawn(fun () -> timer:sleep(1000),
+            {?MODULE, Node} ! {self(), {async_dirty, Tid, Head, Tab}} end),
+        io:format("sending ~p to ~p~n", [{async_dirty, Tid, Head, Tab}, {?MODULE, Node}]),
 	    async_send_dirty(Tid, Tail, Tab, ReadNode, WaitFor, Res)
     end;
 async_send_dirty(_Tid, [], _Tab, _ReadNode, WaitFor, Res) ->

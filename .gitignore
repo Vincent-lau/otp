@@ -1,5 +1,10 @@
 # Match at any level.
 
+# mnesia
+MnesiaCore*
+tempfile*
+Mnesia*/*
+
 # emacs
 *~
 lib/tools/emacs/*.elc
