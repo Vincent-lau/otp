@@ -1326,7 +1326,7 @@ prepare_nodes(_Tid, [], _Items, CommitRecords, _Kind) ->
     CommitRecords.
 
 prepare_ts([Hd | Tl]) ->
-    Ts = erlang:system_time(),
+    Ts = mnesia_vclock:local_event(),
     Commit = Hd#commit{ts = Ts},
     [Commit | prepare_ts(Tl)];
 prepare_ts([]) -> [].

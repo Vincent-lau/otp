@@ -45,7 +45,8 @@ init([]) ->
 	       worker_spec(mnesia_rpc, timer:seconds(3), [gen_server]),
 	       supervisor_spec(mnesia_checkpoint_sup),
 	       worker_spec(mnesia_controller, timer:seconds(3), [gen_server]),
-	       worker_spec(mnesia_late_loader, timer:seconds(3), ProcLib)
+	       worker_spec(mnesia_late_loader, timer:seconds(3), ProcLib),
+           worker_spec(mnesia_vclock, timer:seconds(3), [gen_server])
 	      ],
     {ok, {Flags, Workers}}.
 
