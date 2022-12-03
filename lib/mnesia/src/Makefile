@@ -50,6 +50,7 @@ MODULES= \
 	mnesia_checkpoint \
 	mnesia_checkpoint_sup \
 	mnesia_controller \
+	mnesia_crdt \
 	mnesia_dumper\
 	mnesia_event \
 	mnesia_ext_sup \

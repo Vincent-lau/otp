@@ -111,7 +111,8 @@
 		 disc_copies = [],
 		 disc_only_copies = [],
 		 ext = [],
-		 schema_ops = []
+		 schema_ops = [],
+         ts = 0
 		}).
 
 -record(decision, {tid,
