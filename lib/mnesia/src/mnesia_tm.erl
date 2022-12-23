@@ -208,16 +208,22 @@ unblock_tab(Tab) ->
 doit_loop(#state{coordinators=Coordinators,participants=Participants,supervisor=Sup}=State) ->
     receive
 	{From, {async_dirty, Tid, Commit, Tab}} ->
+        io:format("received async_dirty: ~p~n", [{From, {async_dirty, Tid, Commit, Tab}}]),
 	    case lists:member(Tab, State#state.blocked_tabs) of
 		false ->
-            io:format("received async_dirty: ~p~n", [{From, {async_dirty, Tid, Commit, Tab}}]),
-            case mnesia_crdt:check_ts(Commit) of
-                true -> 
-                    mnesia_crdt:add_op(Commit),
-                    do_async_dirty(Tid, new_cr_format(Commit), Tab);
-                false -> 
-                    io:format("skipping this out of date record: ~p~n", [Commit])
-            end,
+            Deliverable = mnesia_causal:rcv_msg(Tid, Commit, Tab),
+            lists:foreach(fun ({_Tid, C, _Tab}) -> 
+                io:format("Deliverable Commit ~p~n", [C]) end, Deliverable),
+
+            lists:foreach(fun ({Tid2, Commit2, Tab2}) -> 
+                do_async_dirty(Tid2, new_cr_format(Commit2), Tab2) end, Deliverable),
+            % case mnesia_crdt:check_ts(Commit) of
+            %     true -> 
+            %         mnesia_crdt:add_op(Commit),
+            %         do_async_dirty(Tid, new_cr_format(Commit), Tab);
+            %     false -> 
+            %         io:format("skipping this out of date record: ~p~n", [Commit])
+            % end,
 		    doit_loop(State);
 		true ->
 		    Item = {async_dirty, Tid, new_cr_format(Commit), Tab},
@@ -1073,6 +1079,7 @@ dirty(Protocol, Item) ->
     Tid = {dirty, self()},
     Prep = prepare_items(Tid, Tab, Key, [Item], #prep{protocol= Protocol}),
     CR =  Prep#prep.records,
+    io:format("dirty: ~p~n", [CR]),
     case Protocol of
 	async_dirty ->
 	    %% Send commit records to the other involved nodes,
@@ -1249,6 +1256,7 @@ prepare_items(Tid, Tab, Key, Items, Prep) ->
 do_prepare_items(Tid, Tab, Key, Types, Snmp, Items, Recs) ->
     Recs2 = prepare_snmp(Tid, Tab, Key, Types, Snmp, Items, Recs), % May exit
     Recs3 = prepare_nodes(Tid, Types, Items, Recs2, normal),
+    io:format("do prepare_items Rec3: ~p ~p ~p ~p~n", [Tid, Types, Items, Recs2]),
     prepare_ts(Recs3).
 
 
@@ -1325,11 +1333,29 @@ prepare_nodes(Tid, [{Node, Storage} | Rest], Items, C, Kind) ->
 prepare_nodes(_Tid, [], _Items, CommitRecords, _Kind) ->
     CommitRecords.
 
-prepare_ts([Hd | Tl]) ->
-    Ts = mnesia_vclock:local_event(),
-    Commit = Hd#commit{ts = Ts},
-    [Commit | prepare_ts(Tl)];
-prepare_ts([]) -> [].
+
+-spec prepare_ts([#commit{}]) -> [#commit{}].
+prepare_ts(Recs) ->
+    {Node, Ts} = mnesia_causal:send_msg(),
+    do_prepare_ts(Recs, Ts, Node).
+
+
+%% Returns a list of commit record, with node and ts set
+do_prepare_ts([Hd | Tl], Ts, Node) ->
+    % TODO can delete the ts from the commit record
+    Commit = Hd#commit{ts = Ts, sender= Node},
+    RamCopiesWithTime =  
+        case lists:member(porset_copies, mnesia:system_info(backend_types)) of
+            true ->
+                AddTime = 
+                    fun ({Oid, Val, Op}) -> {Oid, {Val, Commit#commit.ts}, Op} end,
+                lists:map(AddTime, Commit#commit.ram_copies);
+            false ->
+                Commit#commit.ram_copies
+        end,
+    Commit2 = Commit#commit{ram_copies = RamCopiesWithTime},
+    [Commit2 | do_prepare_ts(Tl, Ts, Node)];
+do_prepare_ts([], _Ts, _Node) -> [].
 
 pick_node(Tid, Node, [Rec | Rest], Done) ->
     if
@@ -2013,20 +2039,26 @@ async_send_dirty(Tid, Nodes, Tab, ReadNode) ->
     async_send_dirty(Tid, Nodes, Tab, ReadNode, [], ok).
 
 async_send_dirty(Tid, [Head | Tail], Tab, ReadNode, WaitFor, Res) ->
-    % io:format("async_send_dirty: ~p, ReadNode ~p~n", [Rec, ReadNode]),
+    io:format("async_send_dirty Nodes: ~p~n", [[Head | Tail]]),
     Node = Head#commit.node,
     if
 	ReadNode == Node, Node == node() ->
-	    NewRes =  do_dirty(Tid, Head),
-        mnesia_crdt:add_op(Head),
+	    NewRes = do_dirty(Tid, Head),
+        % mnesia_crdt:add_op(Head),
 	    async_send_dirty(Tid, Tail, Tab, ReadNode, WaitFor, NewRes);
 	ReadNode == Node ->
 	    {?MODULE, Node} ! {self(), {sync_dirty, Tid, Head, Tab}},
 	    NewRes = {'EXIT', {aborted, {node_not_running, Node}}},
 	    async_send_dirty(Tid, Tail, Tab, ReadNode, [Node | WaitFor], NewRes);
 	true ->
-        spawn(fun () -> timer:sleep(1000),
-            {?MODULE, Node} ! {self(), {async_dirty, Tid, Head, Tab}} end),
+        if 
+        node() == 'a@127.0.0.1' andalso Node == 'c@127.0.0.1' ->
+            spawn(fun () -> timer:sleep(1000),
+                io:format("delaying sending from a to c~n"),
+                {?MODULE, Node} ! {self(), {async_dirty, Tid, Head, Tab}} end);
+        true ->
+            {?MODULE, Node} ! {self(), {async_dirty, Tid, Head, Tab}}
+        end,
         io:format("sending ~p to ~p~n", [{async_dirty, Tid, Head, Tab}, {?MODULE, Node}]),
 	    async_send_dirty(Tid, Tail, Tab, ReadNode, WaitFor, Res)
     end;
