@@ -200,22 +200,7 @@ doit_loop(#state{coordinators = Coordinators,
             io:format("received async_dirty: ~p~n", [{From, {async_dirty, Tid, Commit, Tab}}]),
             case lists:member(Tab, State#state.blocked_tabs) of
                 false ->
-                    Deliverable = mnesia_causal:rcv_msg(Tid, Commit, Tab),
-                    lists:foreach(fun({_Tid, C, _Tab}) -> io:format("Deliverable Commit ~p~n", [C])
-                                  end,
-                                  Deliverable),
-
-                    lists:foreach(fun({Tid2, Commit2, Tab2}) ->
-                                     do_async_dirty(Tid2, new_cr_format(Commit2), Tab2)
-                                  end,
-                                  Deliverable),
-                    % case mnesia_crdt:check_ts(Commit) of
-                    %     true ->
-                    %         mnesia_crdt:add_op(Commit),
-                    %         do_async_dirty(Tid, new_cr_format(Commit), Tab);
-                    %     false ->
-                    %         io:format("skipping this out of date record: ~p~n", [Commit])
-                    % end,
+                    receive_msg(Tid, Commit, Tab, false),
                     doit_loop(State);
                 true ->
                     Item = {async_dirty, Tid, new_cr_format(Commit), Tab},
@@ -2031,15 +2016,13 @@ sync_send_dirty(Tid, [Head | Tail], Tab, WaitFor) ->
 sync_send_dirty(_Tid, [], _Tab, WaitFor) ->
     {WaitFor, {'EXIT', {aborted, {node_not_running, WaitFor}}}}.
 
-receive_msg(Tid, Commit, Tab) ->
+receive_msg(Tid, Commit, Tab, NoSelf) ->
     D = mnesia_causal:rcv_msg(Tid, Commit, Tab),
-    Node = Commit#commit.node,
     Deliverable =
-        case Node == node() of
-            true ->
-                lists:filter(fun({_Tid, C, _Tab}) -> C#commit.node =/= node() end, D);
-            false ->
-                D
+        if NoSelf ->
+               lists:filter(fun({_Tid, C, _Tab}) -> C#commit.node =/= node() end, D);
+           true ->
+               D
         end,
     lists:foreach(fun({_Tid, C, _Tab}) -> io:format("Deliverable Commit ~p~n", [C]) end,
                   Deliverable),
@@ -2059,16 +2042,15 @@ async_send_dirty(Tid, [Head | Tail], Tab, ReadNode, WaitFor, Res) ->
     io:format("async_send_dirty Nodes: ~p~n", [[Head | Tail]]),
     Node = Head#commit.node,
     if ReadNode == Node, Node == node() ->
-           % receive_msg(Tid, Head, Tab),
-           D = mnesia_causal:rcv_msg(Tid, Head, Tab),
-           Deliverable = lists:filter(fun({_Tid, C, _Tab}) -> C#commit.node =/= node() end, D),
-           lists:foreach(fun({_Tid, C, _Tab}) -> io:format("Deliverable Commit ~p~n", [C]) end,
-                         Deliverable),
-
-           lists:foreach(fun({Tid2, Commit2, Tab2}) ->
-                            do_async_dirty(Tid2, new_cr_format(Commit2), Tab2)
-                         end,
-                         Deliverable),
+           receive_msg(Tid, Head, Tab, true),
+           %    D = mnesia_causal:rcv_msg(Tid, Head, Tab),
+           %    Deliverable = lists:filter(fun({_Tid, C, _Tab}) -> C#commit.node =/= node() end, D),
+           %    lists:foreach(fun({_Tid, C, _Tab}) -> io:format("Deliverable Commit ~p~n", [C]) end,
+           %                  Deliverable),
+           %    lists:foreach(fun({Tid2, Commit2, Tab2}) ->
+           %                     do_async_dirty(Tid2, new_cr_format(Commit2), Tab2)
+           %                  end,
+           %                  Deliverable),
            NewRes = do_dirty(Tid, Head),
            % mnesia_crdt:add_op(Head),
            async_send_dirty(Tid, Tail, Tab, ReadNode, WaitFor, NewRes);
