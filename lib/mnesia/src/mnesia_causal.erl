@@ -3,6 +3,8 @@
 -export([start/0, get_ts/0, send_msg/0, rcv_msg/3, compare_vclock/2]).
 -export([init/1, handle_call/3, handle_cast/2]).
 
+-export([get_buffered/0]).
+
 -include("mnesia.hrl").
 
 -behaviour(gen_server).
@@ -28,6 +30,10 @@ get_ts() ->
 -spec send_msg() -> {node(), vclock()}.
 send_msg() ->
     gen_server:call(?MODULE, send_msg).
+
+-spec get_buffered() -> [mmsg()].
+get_buffered() ->
+    gen_server:call(?MODULE, get_buf).
 
 %% @doc receive an event from another node
 %% @return {vclock(), [event()]} the new vector clock and events ready to
@@ -55,6 +61,8 @@ init(_Args) ->
             delivered = new(),
             buffer = []}}.
 
+handle_call(get_buf, _From, #state{buffer =  Buffer} = State) ->
+    {reply, Buffer, State};
 handle_call(get_ts, _From, #state{delivered = D} = State) ->
     {reply, {D, erlang:system_time()}, State};
 handle_call(send_msg, _From, State = #state{delivered = Delivered, send_seq = SendSeq}) ->
