@@ -47,10 +47,10 @@ MODULES= \
 	mnesia_backend_type \
 	mnesia_backup \
 	mnesia_bup \
+	mnesia_causal \
 	mnesia_checkpoint \
 	mnesia_checkpoint_sup \
 	mnesia_controller \
-	mnesia_crdt \
 	mnesia_dumper\
 	mnesia_event \
 	mnesia_ext_sup \
@@ -74,8 +74,7 @@ MODULES= \
 	mnesia_sup \
 	mnesia_sp  \
 	mnesia_text \
-	mnesia_tm \
-	mnesia_vclock
+	mnesia_tm
 
 HRL_FILES= mnesia.hrl
 
