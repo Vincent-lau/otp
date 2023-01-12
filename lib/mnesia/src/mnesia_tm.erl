@@ -1325,15 +1325,20 @@ prepare_ts(Recs) ->
 do_prepare_ts([Hd | Tl], Ts, Node) ->
     % TODO can delete the ts from the commit record
     Commit = Hd#commit{ts = Ts, sender = Node},
-    RamCopiesWithTime =
+    ExtCopiesWithTime =
         case lists:member(porset_copies, mnesia:system_info(backend_types)) of
             true ->
-                AddTime = fun({Oid, Val, Op}) -> {Oid, {Val, Commit#commit.ts}, Op} end,
-                lists:map(AddTime, Commit#commit.ram_copies);
+                AddTime =
+                    fun({ExtInfo = {ext, porset_copies, mnesia_porset}, {Oid, Val, Op}}) ->
+                       {ExtInfo, {Oid, {Val, Commit#commit.ts}, Op}}
+                    end,
+                [{ext_copies, ExtCopies}] = Commit#commit.ext,
+                NewExtCopies = lists:map(AddTime, ExtCopies),
+                [{ext_copies, NewExtCopies}];
             false ->
-                Commit#commit.ram_copies
+                Commit#commit.ext
         end,
-    Commit2 = Commit#commit{ram_copies = RamCopiesWithTime},
+    Commit2 = Commit#commit{ext = ExtCopiesWithTime},
     [Commit2 | do_prepare_ts(Tl, Ts, Node)];
 do_prepare_ts([], _Ts, _Node) ->
     [].
@@ -2024,8 +2029,7 @@ receive_msg(Tid, Commit, Tab, NoSelf) ->
            true ->
                D
         end,
-    lists:foreach(fun({_Tid, C, _Tab}) -> io:format("Deliverable Commit ~p~n", [C]) end,
-                  Deliverable),
+    lists:foreach(fun({_Tid, C, _Tab}) -> io:format("Deliverable Commit ~p~n", [C]) end, D),
 
     lists:foreach(fun({Tid2, Commit2, Tab2}) ->
                      do_async_dirty(Tid2, new_cr_format(Commit2), Tab2)
