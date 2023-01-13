@@ -1328,12 +1328,12 @@ do_prepare_ts([Hd | Tl], Ts, Node) ->
     ExtCopiesWithTime =
         case lists:member(porset_copies, mnesia:system_info(backend_types)) of
             true ->
-                AddTime =
-                    fun({ExtInfo = {ext, porset_copies, mnesia_porset}, {Oid, Val, Op}}) ->
-                       {ExtInfo, {Oid, {Val, Commit#commit.ts}, Op}}
-                    end,
+                % AddTime =
+                %     fun({ExtInfo = {ext, porset_copies, mnesia_porset}, {Oid, Val, Op}}) ->
+                %        {ExtInfo, {Oid, {Val, Commit#commit.ts}, Op}}
+                %     end,
                 [{ext_copies, ExtCopies}] = Commit#commit.ext,
-                NewExtCopies = lists:map(AddTime, ExtCopies),
+                NewExtCopies = lists:map(fun(ExtInfo) -> add_time(ExtInfo, Commit) end, ExtCopies),
                 [{ext_copies, NewExtCopies}];
             false ->
                 Commit#commit.ext
@@ -1342,6 +1342,15 @@ do_prepare_ts([Hd | Tl], Ts, Node) ->
     [Commit2 | do_prepare_ts(Tl, Ts, Node)];
 do_prepare_ts([], _Ts, _Node) ->
     [].
+
+add_time({ExtInfo = {ext, porset_copies, mnesia_porset}, {Oid, Val, write}}, Commit) ->
+    {ExtInfo, {Oid, {Val, Commit#commit.ts}, write}};
+add_time({ExtInfo = {ext, porset_copies, mnesia_porset},
+          {_Oid = {Tab, Key}, Val, delete}},
+         Commit) ->
+    {ExtInfo, {{Tab, {Key, Commit#commit.ts}}, Val, delete}};
+add_time({ExtInfo = {ext, porset_copies, mnesia_porset}, {Oid, Val, Op}}, Commit) ->
+    {ExtInfo, {Oid, {Val, Commit#commit.ts}, Op}}.
 
 pick_node(Tid, Node, [Rec | Rest], Done) ->
     if Rec#commit.node == Node ->
