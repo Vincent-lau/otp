@@ -65,7 +65,7 @@ handle_call(get_buf, _From, #state{buffer = Buffer} = State) ->
 handle_call(get_ts, _From, #state{delivered = D} = State) ->
     {reply, {D, erlang:system_time()}, State};
 handle_call(send_msg, _From, State = #state{delivered = Delivered, send_seq = SendSeq}) ->
-    Deps = Delivered#{node() := SendSeq},
+    Deps = Delivered#{node() := SendSeq + 1},
     {reply, {node(), Deps}, State#state{send_seq = SendSeq + 1}};
 handle_call({receive_msg, MM = #mmsg{}},
             _From,
@@ -77,27 +77,6 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 %%% internal functions
-
-%% @doc updating the vclock only when we deliver it, could have incred one when sending
-%% not sure which one is better
-%% @end
-update_ts({ExtInfo = {ext, porset_copies, mnesia_porset}, {Oid, {Val, _Ts}, write}},
-          NewTs) ->
-    {ExtInfo, {Oid, {Val, NewTs}, write}};
-update_ts({ExtInfo = {ext, porset_copies, mnesia_porset},
-           {_Oid = {Tab, {Key, _Ts}}, Val, delete}},
-          NewTs) ->
-    {ExtInfo, {{Tab, {Key, NewTs}}, Val, delete}};
-update_ts({ExtInfo = {ext, porset_copies, mnesia_porset}, {Oid, {Val, _Ts}, Op}},
-          NewTs) ->
-    {ExtInfo, {Oid, {Val, NewTs}, Op}}.
-
-update_ts_at_dev(Mmsg = #mmsg{msg = #commit{sender = Sender, ts = Deps} = Commit}) ->
-    NewTs = increment(Sender, Deps),
-    [{ext_copies, ExtCopies}] = Commit#commit.ext,
-    NewExtCopies = lists:map(fun(ExtInfo) -> update_ts(ExtInfo, NewTs) end, ExtCopies),
-    NewCommit = Commit#commit{ts = NewTs, ext = [{ext_copies, NewExtCopies}]},
-    Mmsg#mmsg{msg = NewCommit}.
 
 %% @doc
 %% update the delivered vector clock and buffer
@@ -113,19 +92,28 @@ find_deliverable(MM, Delivered, Buf1) ->
 do_find_deliverable(Delivered, Buff, Buff, Deliverable) ->
     {Delivered, Buff, Deliverable};
 do_find_deliverable(Delivered, _OldBuff, Buff, Deliverable) ->
-    Leq = fun(VC1, VC2) ->
-             R = compare_vclock(VC1, VC2),
-             R =:= eq orelse R =:= lt
-          end,
     {Dev, NDev} =
-        lists:partition(fun(#mmsg{msg = #commit{ts = Deps}}) -> Leq(Deps, Delivered) end, Buff),
-    IncredDev = lists:map(fun update_ts_at_dev/1, Dev),
+        lists:partition(fun(#mmsg{msg = #commit{ts = Deps, sender = Sender}}) ->
+                           msg_deliverable(Deps, Delivered, Sender)
+                        end,
+                        Buff),
+    % IncredDev = lists:map(fun update_ts_at_dev/1, Dev),
     NewDelivered =
         lists:foldl(fun(#mmsg{msg = #commit{sender = Sender}}, AccIn) -> increment(Sender, AccIn)
                     end,
                     Delivered,
                     Dev),
-    do_find_deliverable(NewDelivered, Buff, NDev, Deliverable ++ IncredDev).
+    do_find_deliverable(NewDelivered, Buff, NDev, Deliverable ++ Dev).
+
+%% @doc Deps is the vector clock of the event
+%% Delivered is the local vector clock
+%% @end
+-spec msg_deliverable(vclock(), vclock(), node()) -> boolean().
+msg_deliverable(Deps, Delivered, Sender) ->
+    OtherDeps = maps:remove(Sender, Deps),
+    OtherDelivered = maps:remove(Sender, Delivered),
+    maps:get(Sender, Deps) == maps:get(Sender, Delivered) + 1
+    andalso vclock_leq(OtherDeps, OtherDelivered).
 
 % -spec update_vclock(vclock(), vclock(), integer()) -> vclock().
 % update_vclock(Node, EvnClk, MyClk) ->
@@ -140,6 +128,12 @@ new() ->
 -spec increment(node(), vclock()) -> vclock().
 increment(Node, C) ->
     C#{Node := maps:get(Node, C, 0) + 1}.
+
+%% @doc convenience function for comparing two vector clocks, true when VC1 <= VC2
+-spec vclock_leq(vclock(), vclock()) -> boolean().
+vclock_leq(VC1, VC2) ->
+    R = compare_vclock(VC1, VC2),
+    R =:= eq orelse R =:= lt.
 
 -spec compare_vclock([integer()], [integer()]) -> ord().
 compare_vclock(VClock1, VClock2) ->
