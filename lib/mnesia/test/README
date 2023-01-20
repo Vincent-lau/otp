@@ -43,7 +43,7 @@ be started with the distribution enabled and the code path must
 be set to the mnesia/ebin, mnesia/examples, and mnesia/test
 directories. E.g. the following would do:
 
-    erl -sname a -pa $top/examples -pa $top/src -pa $top/ebin
+    erl -sname a -pa $top/examples -pa $top/src -pa $top/ebin -pa $top/test
 
 where $top is the path to the Mnesia installation. Many test
 cases needs 2 or 3 nodes. The node names may explicitly be
