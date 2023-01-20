@@ -197,7 +197,7 @@ doit_loop(#state{coordinators = Coordinators,
               State) ->
     receive
         {From, {async_dirty, Tid, Commit, Tab}} ->
-            io:format("received async_dirty: ~p~n", [{From, {async_dirty, Tid, Commit, Tab}}]),
+            dbg_out("received async_dirty: ~p~n", [{From, {async_dirty, Tid, Commit, Tab}}]),
             case lists:member(Tab, State#state.blocked_tabs) of
                 false ->
                     receive_msg(Tid, Commit, Tab),
@@ -1061,7 +1061,7 @@ dirty(Protocol, Item) ->
     Tid = {dirty, self()},
     Prep = prepare_items(Tid, Tab, Key, [Item], #prep{protocol = Protocol}),
     CR = Prep#prep.records,
-    io:format("dirty: ~p~n", [CR]),
+    dbg_out("dirty: ~p~n", [CR]),
     case Protocol of
         async_dirty ->
             %% Send commit records to the other involved nodes,
@@ -1241,7 +1241,7 @@ prepare_items(Tid, Tab, Key, Items, Prep) ->
 do_prepare_items(Tid, Tab, Key, Types, Snmp, Items, Recs) ->
     Recs2 = prepare_snmp(Tid, Tab, Key, Types, Snmp, Items, Recs), % May exit
     Recs3 = prepare_nodes(Tid, Types, Items, Recs2, normal),
-    io:format("do prepare_items Rec3: ~p ~p ~p ~p~n", [Tid, Types, Items, Recs2]),
+    dbg_out("do prepare_items Rec3: ~p ~p ~p ~p~n", [Tid, Types, Items, Recs2]),
     prepare_ts(Recs3).
 
 needs_majority(Tab, #prep{majority = M}) ->
@@ -2030,7 +2030,7 @@ receive_msg(Tid, Commit, Tab) ->
     D = mnesia_causal:rcv_msg(Tid, Commit, Tab),
     {Deliverable, [{Tid1, Commit1, _Tab1}]} =
         lists:partition(fun({_Tid, C, _Tab}) -> C#commit.node =/= node() end, D),
-    lists:foreach(fun({_Tid, C, _Tab}) -> io:format("Deliverable Commit ~p~n", [C]) end, D),
+    lists:foreach(fun({_Tid, C, _Tab}) -> dbg_out("Deliverable Commit ~p~n", [C]) end, D),
     lists:foreach(fun({Tid2, Commit2, Tab2}) ->
                      do_async_dirty(Tid2, new_cr_format(Commit2), Tab2)
                   end,
@@ -2044,7 +2044,7 @@ async_send_dirty(Tid, Nodes, Tab, ReadNode) ->
     async_send_dirty(Tid, Nodes, Tab, ReadNode, [], ok).
 
 async_send_dirty(Tid, [Head | Tail], Tab, ReadNode, WaitFor, Res) ->
-    io:format("async_send_dirty Nodes: ~p~n", [[Head | Tail]]),
+    dbg_out("async_send_dirty Nodes: ~p~n", [[Head | Tail]]),
     Node = Head#commit.node,
     if ReadNode == Node, Node == node() ->
            NewRes = receive_msg(Tid, Head, Tab),
@@ -2058,13 +2058,13 @@ async_send_dirty(Tid, [Head | Tail], Tab, ReadNode, WaitFor, Res) ->
            if node() =:= 'b@127.0.0.1' andalso Node =:= 'a@127.0.0.1' ->
                   spawn(fun() ->
                            timer:sleep(500000),
-                           io:format("delaying sending from a to b~n"),
+                           dbg_out("delaying sending from a to b~n", []),
                            {?MODULE, Node} ! {self(), {async_dirty, Tid, Head, Tab}}
                         end);
               true ->
                   {?MODULE, Node} ! {self(), {async_dirty, Tid, Head, Tab}}
            end,
-           io:format("sending ~p to ~p~n", [{async_dirty, Tid, Head, Tab}, {?MODULE, Node}]),
+           dbg_out("sending ~p to ~p~n", [{async_dirty, Tid, Head, Tab}, {?MODULE, Node}]),
            async_send_dirty(Tid, Tail, Tab, ReadNode, WaitFor, Res)
     end;
 async_send_dirty(_Tid, [], _Tab, _ReadNode, WaitFor, Res) ->

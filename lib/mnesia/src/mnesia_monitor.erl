@@ -823,7 +823,7 @@ detect_inconcistency(Nodes, Context) ->
     Downs = [N || N <- Nodes, mnesia_recover:has_mnesia_down(N)],
     {Replies, _BadNodes} =
 	rpc:multicall(Downs, ?MODULE, has_remote_mnesia_down, [node()]),
-    io:format("detecting inconsistency~n"),
+    dbg_out("detecting inconsistency~n", []),
     report_inconsistency(Replies, Context, ok).
 
 has_remote_mnesia_down(Node) ->
