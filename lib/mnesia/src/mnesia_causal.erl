@@ -2,7 +2,7 @@
 
 -export([start/0, get_ts/0, send_msg/0, rcv_msg/3, compare_vclock/2]).
 -export([init/1, handle_call/3, handle_cast/2]).
--export([get_buffered/0]).
+-export([get_buffered/0, new/0]).
 
 -include("mnesia.hrl").
 
