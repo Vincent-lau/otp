@@ -200,7 +200,7 @@ doit_loop(#state{coordinators = Coordinators,
             dbg_out("received async_dirty: ~p~n", [{From, {async_dirty, Tid, Commit, Tab}}]),
             case lists:member(Tab, State#state.blocked_tabs) of
                 false ->
-                    receive_msg(Tid, Commit, Tab),
+                    receive_msg(Tid, Commit, Tab, false),
                     doit_loop(State);
                 true ->
                     Item = {async_dirty, Tid, new_cr_format(Commit), Tab},
@@ -1242,7 +1242,13 @@ do_prepare_items(Tid, Tab, Key, Types, Snmp, Items, Recs) ->
     Recs2 = prepare_snmp(Tid, Tab, Key, Types, Snmp, Items, Recs), % May exit
     Recs3 = prepare_nodes(Tid, Types, Items, Recs2, normal),
     dbg_out("do prepare_items Rec3: ~p ~p ~p ~p~n", [Tid, Types, Items, Recs2]),
-    prepare_ts(Recs3).
+    case mnesia_monitor:get_env(causal) of
+        true ->
+            dbg_out("applying causal delivery~n", []),
+            prepare_ts(Recs3);
+        false ->
+            Recs3
+    end.
 
 needs_majority(Tab, #prep{majority = M}) ->
     case lists:keymember(Tab, 1, M) of
@@ -1324,15 +1330,16 @@ prepare_ts(Recs) ->
 %% Returns a list of commit record, with node and ts set
 do_prepare_ts([Hd | Tl], Ts, Node) ->
     % TODO can delete the ts from the commit record
+    % TODO we only add ts to ext copies for now, since no need of causal delivery
+    % for other copies
     Commit = Hd#commit{ts = Ts, sender = Node},
     ExtCopiesWithTime =
-        case lists:member(porset_copies, mnesia:system_info(backend_types)) of
-            true ->
-                [{ext_copies, ExtCopies}] = Commit#commit.ext,
-                NewExtCopies = lists:map(fun(ExtInfo) -> add_time(ExtInfo, Commit) end, ExtCopies),
+        case Commit#commit.ext of
+            [{ext_copies, ExtCopies}] ->
+                NewExtCopies = [add_time(ExtCopy, Commit) || ExtCopy <- ExtCopies],
                 [{ext_copies, NewExtCopies}];
-            false ->
-                Commit#commit.ext
+            [] ->
+                []
         end,
     Commit2 = Commit#commit{ext = ExtCopiesWithTime},
     [Commit2 | do_prepare_ts(Tl, Ts, Node)];
@@ -1346,7 +1353,10 @@ add_time({ExtInfo = {ext, porset_copies, mnesia_porset},
          Commit) ->
     {ExtInfo, {{Tab, {Key, Commit#commit.ts}}, Val, delete}};
 add_time({ExtInfo = {ext, porset_copies, mnesia_porset}, {Oid, Val, Op}}, Commit) ->
-    {ExtInfo, {Oid, {Val, Commit#commit.ts}, Op}}.
+    {ExtInfo, {Oid, {Val, Commit#commit.ts}, Op}};
+add_time(ExtCopy, _Commit) ->
+    % adding time to each element in the commit is porset specific
+    ExtCopy.
 
 pick_node(Tid, Node, [Rec | Rest], Done) ->
     if Rec#commit.node == Node ->
@@ -2026,16 +2036,31 @@ sync_send_dirty(Tid, [Head | Tail], Tab, WaitFor) ->
 sync_send_dirty(_Tid, [], _Tab, WaitFor) ->
     {WaitFor, {'EXIT', {aborted, {node_not_running, WaitFor}}}}.
 
-receive_msg(Tid, Commit, Tab) ->
-    D = mnesia_causal:rcv_msg(Tid, Commit, Tab),
-    {Deliverable, [{Tid1, Commit1, _Tab1}]} =
-        lists:partition(fun({_Tid, C, _Tab}) -> C#commit.node =/= node() end, D),
-    lists:foreach(fun({_Tid, C, _Tab}) -> dbg_out("Deliverable Commit ~p~n", [C]) end, D),
-    lists:foreach(fun({Tid2, Commit2, Tab2}) ->
-                     do_async_dirty(Tid2, new_cr_format(Commit2), Tab2)
-                  end,
-                  Deliverable),
-    do_dirty(Tid1, Commit1).
+receive_msg(Tid, Commit, Tab, true) ->
+    do_receive_msg(Tid, Commit, Tab),
+    do_dirty(Tid, Commit);
+receive_msg(Tid, Commit, Tab, false) ->
+    case do_receive_msg(Tid, Commit, Tab) of
+        true ->
+            do_async_dirty(Tid, new_cr_format(Commit), Tab);
+        false ->
+            ok
+    end.
+
+do_receive_msg(Tid, Commit, Tab) ->
+    case mnesia_monitor:get_env(causal) of
+        true ->
+            D = mnesia_causal:rcv_msg(Tid, Commit, Tab),
+            {Deliverable, Local} = lists:partition(fun(DInfo) -> DInfo =/= {Tid, Commit, Tab} end, D),
+            lists:foreach(fun({_Tid, C, _Tab}) -> dbg_out("Deliverable Commit ~p~n", [C]) end, D),
+            lists:foreach(fun({Tid1, Commit1, Tab1}) ->
+                             do_async_dirty(Tid1, new_cr_format(Commit1), Tab1)
+                          end,
+                          Deliverable),
+            length(Local) > 0;
+        false ->
+            false
+    end.
 
 %% Returns {WaitFor, Res}
 async_send_dirty(_Tid, _Nodes, Tab, nowhere) ->
@@ -2047,7 +2072,7 @@ async_send_dirty(Tid, [Head | Tail], Tab, ReadNode, WaitFor, Res) ->
     dbg_out("async_send_dirty Nodes: ~p~n", [[Head | Tail]]),
     Node = Head#commit.node,
     if ReadNode == Node, Node == node() ->
-           NewRes = receive_msg(Tid, Head, Tab),
+           NewRes = receive_msg(Tid, Head, Tab, true),
            %    NewRes = do_dirty(Tid, Head),
            async_send_dirty(Tid, Tail, Tab, ReadNode, WaitFor, NewRes);
        ReadNode == Node ->

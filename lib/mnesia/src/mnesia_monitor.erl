@@ -745,7 +745,9 @@ default_env(send_compressed) ->
 default_env(max_transfer_size) ->
     64000;
 default_env(schema) ->
-    [].
+    [];
+default_env(causal) ->
+    false.
 
 check_type(Env, Val) ->
     try do_check_type(Env, Val)
@@ -794,7 +796,8 @@ do_check_type(no_table_loaders, N) when is_integer(N), N > 0 -> N;
 do_check_type(dc_dump_limit,N) when is_number(N), N > 0 -> N;
 do_check_type(send_compressed, L) when is_integer(L), L >= 0, L =< 9 -> L;
 do_check_type(max_transfer_size, N) when is_integer(N), N > 0 -> N;
-do_check_type(schema, L) when is_list(L) -> L.
+do_check_type(schema, L) when is_list(L) -> L;
+do_check_type(causal, B) when is_boolean(B) -> B.
 
 bool(true) -> true;
 bool(false) -> false.
