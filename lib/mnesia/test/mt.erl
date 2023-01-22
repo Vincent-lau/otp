@@ -29,77 +29,110 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 -module(mt).
--author('hakan@erix.ericsson.se').
--export([
-	 t/0, t/1, t/2, t/3,                % Run test cases
-	 loop/1, loop/2, loop/3,            % loop test cases
-	 doc/0, doc/1,                      % Generate test case doc
-	 struct/0, struct/1,                % View test suite struct
-	 shutdown/0, ping/0, start_nodes/0, % Node admin
-	 read_config/0, write_config/1      % Config admin
-	]).
 
--compile({no_auto_import,[alias/1]}).
+-author('hakan@erix.ericsson.se').
+
+-export([t/0, t/1, t/2, t/3, loop/1, loop/2, loop/3, doc/0, doc/1, struct/0, struct/1,
+         shutdown/0, ping/0, start_nodes/0, read_config/0,
+         write_config/1]).                % Run test cases
+
+                                            % loop test cases
+                      % Generate test case doc
+
+                                            % View test suite struct
+ % Node admin
+
+                                            % Config admin
+
+-compile({no_auto_import, [alias/1]}).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Aliases for the (sub) test suites
-alias(all) -> mnesia_SUITE;
-alias(atomicity) -> mnesia_atomicity_test;
-alias(backup) -> mnesia_evil_backup;
-alias(config) -> mnesia_config_test;
-alias(consistency) -> mnesia_consistency_test;
-alias(dirty) -> mnesia_dirty_access_test;
-alias(durability) -> mnesia_durability_test;
-alias(evil) -> mnesia_evil_coverage_test;
-alias(qlc) -> mnesia_qlc_test;
-alias(examples) -> mnesia_examples_test;
-alias(frag) -> mnesia_frag_test;
-alias(heavy) -> {mnesia_SUITE, heavy};
-alias(install) -> mnesia_install_test;
-alias(isolation) -> mnesia_isolation_test;
-alias(light) -> {mnesia_SUITE, light};
-alias(majority) -> mnesia_majority_test;
-alias(measure) -> mnesia_measure_test;
-alias(medium) -> {mnesia_SUITE, medium};
-alias(nice) -> mnesia_nice_coverage_test;
-alias(recover) -> mnesia_recover_test;
-alias(recovery) -> mnesia_recovery_test;
-alias(registry) -> mnesia_registry_test;
-alias(suite) -> mnesia_SUITE;
-alias(trans) -> mnesia_trans_access_test;
-alias(ixp) -> mnesia_index_plugin_test;
-alias(Other) -> Other.
+alias(all) ->
+    mnesia_SUITE;
+alias(atomicity) ->
+    mnesia_atomicity_test;
+alias(backup) ->
+    mnesia_evil_backup;
+alias(config) ->
+    mnesia_config_test;
+alias(consistency) ->
+    mnesia_consistency_test;
+alias(dirty) ->
+    mnesia_dirty_access_test;
+alias(durability) ->
+    mnesia_durability_test;
+alias(evil) ->
+    mnesia_evil_coverage_test;
+alias(qlc) ->
+    mnesia_qlc_test;
+alias(examples) ->
+    mnesia_examples_test;
+alias(frag) ->
+    mnesia_frag_test;
+alias(heavy) ->
+    {mnesia_SUITE, heavy};
+alias(install) ->
+    mnesia_install_test;
+alias(isolation) ->
+    mnesia_isolation_test;
+alias(light) ->
+    {mnesia_SUITE, light};
+alias(majority) ->
+    mnesia_majority_test;
+alias(measure) ->
+    mnesia_measure_test;
+alias(medium) ->
+    {mnesia_SUITE, medium};
+alias(nice) ->
+    mnesia_nice_coverage_test;
+alias(recover) ->
+    mnesia_recover_test;
+alias(recovery) ->
+    mnesia_recovery_test;
+alias(registry) ->
+    mnesia_registry_test;
+alias(suite) ->
+    mnesia_SUITE;
+alias(trans) ->
+    mnesia_trans_access_test;
+alias(ixp) ->
+    mnesia_index_plugin_test;
+alias(Other) ->
+    Other.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Resolves the name of test suites and test cases
 %% according to the alias definitions. Single atoms
-%% are assumed to be the name of a test suite. 
+%% are assumed to be the name of a test suite.
 resolve(Suite0) when is_atom(Suite0) ->
     case alias(Suite0) of
-	Suite when is_atom(Suite) ->
-	    {Suite, all};
-	{Suite, Case} ->
-	    {Suite, is_group(Suite,Case)}
+        Suite when is_atom(Suite) ->
+            {Suite, all};
+        {Suite, Case} ->
+            {Suite, is_group(Suite, Case)}
     end;
 resolve({Suite0, {group, Case}}) ->
     resolve({Suite0, Case});
 resolve({Suite0, Case}) when is_atom(Suite0), is_atom(Case) ->
     case alias(Suite0) of
-	Suite when is_atom(Suite) ->
-	    {Suite, is_group(Suite,Case)};
-	{Suite, Case2} ->
-	    {Suite, is_group(Suite,Case2)}
+        Suite when is_atom(Suite) ->
+            {Suite, is_group(Suite, Case)};
+        {Suite, Case2} ->
+            {Suite, is_group(Suite, Case2)}
     end;
 resolve(List) when is_list(List) ->
     [resolve(Case) || Case <- List].
 
 is_group(Mod, Case) ->
-    try {_,_,_} = lists:keyfind(Case, 1, Mod:groups()),
-	 {group, Case}
-    catch _:{badmatch,_} ->
-	    Case
+    try
+        {_, _, _} = lists:keyfind(Case, 1, Mod:groups()),
+        {group, Case}
+    catch
+        _:{badmatch, _} ->
+            Case
     end.
-    
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Run one or more test cases
 
@@ -147,10 +180,10 @@ read_config() ->
     mnesia_test_lib:log("Consulting file ~s...~n", [Fname]),
     case file:consult(Fname) of
         {ok, Config} ->
-	    mnesia_test_lib:log("Read config ~w~n", [Config]),
+            mnesia_test_lib:log("Read config ~w~n", [Config]),
             Config;
         _Error ->
-	    Config = mnesia_test_lib:default_config(),
+            Config = mnesia_test_lib:default_config(),
             mnesia_test_lib:log("<>WARNING<> Using default config: ~w~n", [Config]),
             Config
     end.
@@ -161,9 +194,9 @@ write_config(Config) when is_list(Config) ->
     {ok, Fd} = file:open(Fname, write),
     write_list(Fd, Config),
     file:close(Fd).
-	    
+
 write_list(Fd, [H | T]) ->
-    ok = io:format(Fd, "~p.~n",[H]),
+    ok = io:format(Fd, "~p.~n", [H]),
     write_list(Fd, T);
 write_list(_, []) ->
     ok.
@@ -175,42 +208,40 @@ test_case_fname() ->
 read_test_case() ->
     Fname = test_case_fname(),
     case file:open(Fname, [read]) of
-	{ok, Fd} ->
-	    Res = io:read(Fd, []),
-	    file:close(Fd),
-	    case Res of
-		{ok, TestCase} ->
-		    mnesia_test_lib:log("Using test case ~w from file ~s~n",
-					[TestCase, Fname]),
-		    TestCase;
-		{error, _} ->
-		    default_test_case(Fname)
-	    end;
-	{error, _} ->
-	    default_test_case(Fname)
+        {ok, Fd} ->
+            Res = io:read(Fd, []),
+            file:close(Fd),
+            case Res of
+                {ok, TestCase} ->
+                    mnesia_test_lib:log("Using test case ~w from file ~s~n", [TestCase, Fname]),
+                    TestCase;
+                {error, _} ->
+                    default_test_case(Fname)
+            end;
+        {error, _} ->
+            default_test_case(Fname)
     end.
 
 default_test_case(Fname) ->
-    TestCase = all, 
-    mnesia_test_lib:log("<>WARNING<> Cannot read file ~s, "
-			"using default test case: ~w~n",
-			[Fname, TestCase]),
+    TestCase = all,
+    mnesia_test_lib:log("<>WARNING<> Cannot read file ~s, using default test case: ~w~n",
+                        [Fname, TestCase]),
     TestCase.
 
 write_test_case(TestCase) ->
     Fname = test_case_fname(),
     {ok, Fd} = file:open(Fname, write),
-    ok = io:format(Fd, "~p.~n",[TestCase]),
+    ok = io:format(Fd, "~p.~n", [TestCase]),
     file:close(Fd).
-	    
+
 append_test_case_info(TestCase, TestCaseInfo) ->
     Fname = test_case_fname(),
     {ok, Fd} = file:open(Fname, [read, write]),
-    ok = io:format(Fd, "~p.~n",[TestCase]),
-    ok = io:format(Fd, "~p.~n",[TestCaseInfo]),
+    ok = io:format(Fd, "~p.~n", [TestCase]),
+    ok = io:format(Fd, "~p.~n", [TestCaseInfo]),
     file:close(Fd),
     TestCaseInfo.
-	    
+
 %% Generate HTML pages from the test case structure
 doc() ->
     doc(suite).
@@ -245,30 +276,32 @@ start_nodes() ->
 %% loop one testcase /suite until it fails
 
 loop(Case) ->
-    loop_1(Case,-1,read_config()).
+    loop_1(Case, -1, read_config()).
 
-loop(M,F) when is_atom(F) ->
-    loop_1({M,F},-1,read_config());
-loop(Case,N) when is_integer(N) ->
-    loop_1(Case, N,read_config()).
+loop(M, F) when is_atom(F) ->
+    loop_1({M, F}, -1, read_config());
+loop(Case, N) when is_integer(N) ->
+    loop_1(Case, N, read_config()).
 
-loop(M,F,N) when is_integer(N) ->
-    loop_1({M,F},N,read_config()).
+loop(M, F, N) when is_integer(N) ->
+    loop_1({M, F}, N, read_config()).
 
-loop_1(Case,N,Config) when N /= 0 ->
+loop_1(Case, N, Config) when N /= 0 ->
     io:format("Loop test ~p ~n", [abs(N)]),
-    case ok_result(Res = t(Case,Config)) of
-	true ->
-	    loop_1(Case,N-1,Config);
-	error ->
-	    Res
+    case ok_result(Res = t(Case, Config)) of
+        true ->
+            loop_1(Case, N - 1, Config);
+        error ->
+            Res
     end;
-loop_1(_,_,_) ->
+loop_1(_, _, _) ->
     ok.
-	    
-ok_result([{_T,{ok,_,_}}|R]) -> 
+
+ok_result([{_T, {ok, _, _}} | R]) ->
     ok_result(R);
-ok_result([{_T,{TC,List}}|R]) when is_tuple(TC), is_list(List) -> 
+ok_result([{_T, {TC, List}} | R]) when is_tuple(TC), is_list(List) ->
     ok_result(List) andalso ok_result(R);
-ok_result([]) -> true;
-ok_result(_) -> error.
+ok_result([]) ->
+    true;
+ok_result(_) ->
+    error.
