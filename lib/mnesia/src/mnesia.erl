@@ -35,6 +35,7 @@
 	 abort/1, transaction/1, transaction/2, transaction/3,
 	 sync_transaction/1, sync_transaction/2, sync_transaction/3,
 	 async_dirty/1, async_dirty/2, sync_dirty/1, sync_dirty/2, ets/1, ets/2,
+     async_ec/1, async_ec/2,
 	 activity/2, activity/3, activity/4, % Not for public use
 	 is_transaction/0,
 
@@ -442,6 +443,16 @@ async_dirty(Fun) ->
 async_dirty(Fun, Args) ->
     non_transaction(get(mnesia_activity_state), Fun, Args, async_dirty, ?DEFAULT_ACCESS).
 
+-spec async_ec(Fun) -> Res | no_return() when
+      Fun :: fun(() -> Res).
+async_ec(Fun) ->
+    async_ec(Fun, []).
+
+-spec async_ec(Fun, [Arg::_]) -> Res | no_return() when
+      Fun :: fun((...) -> Res).
+async_ec(Fun, Args) ->
+    non_transaction(get(mnesia_activity_state), Fun, Args, async_ec, mnesia_ec).
+
 -spec sync_dirty(Fun) -> Res | no_return() when
       Fun :: fun(() -> Res).
 sync_dirty(Fun) ->
@@ -492,6 +503,7 @@ activity(Kind, Fun, Args, Mod) ->
 	ets ->                    non_transaction(State, Fun, Args, Kind, Mod);
 	async_dirty ->            non_transaction(State, Fun, Args, Kind, Mod);
 	sync_dirty ->             non_transaction(State, Fun, Args, Kind, Mod);
+    async_ec ->               non_transaction(State, Fun, Args, Kind, Mod);
 	transaction ->            wrap_trans(State, Fun, Args, infinity, Mod, async);
 	{transaction, Retries} -> wrap_trans(State, Fun, Args, Retries, Mod, async);
 	sync_transaction ->            wrap_trans(State, Fun, Args, infinity, Mod, sync);

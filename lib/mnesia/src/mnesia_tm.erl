@@ -26,6 +26,7 @@
          prepare_checkpoint/2, prepare_checkpoint/1, prepare_snmp/3, do_snmp/2, put_activity_id/1,
          put_activity_id/2, block_tab/1, unblock_tab/1, fixtable/3, new_cr_format/1]).
 
+-export([prepare_nodes/5, prepare_snmp/7, needs_majority/2, rec_dirty/2]).
                                % Internal
 
 %% sys callback functions
@@ -196,11 +197,10 @@ doit_loop(#state{coordinators = Coordinators,
                  supervisor = Sup} =
               State) ->
     receive
-        {From, {async_dirty, Tid, Commit, Tab}} ->
-            dbg_out("received async_dirty: ~p~n", [{From, {async_dirty, Tid, Commit, Tab}}]),
+        {_From, {async_dirty, Tid, Commit, Tab}} ->
             case lists:member(Tab, State#state.blocked_tabs) of
                 false ->
-                    receive_msg(Tid, Commit, Tab, false),
+                    do_async_dirty(Tid, new_cr_format(Commit), Tab),
                     doit_loop(State);
                 true ->
                     Item = {async_dirty, Tid, new_cr_format(Commit), Tab},
@@ -1240,15 +1240,7 @@ prepare_items(Tid, Tab, Key, Items, Prep) ->
 
 do_prepare_items(Tid, Tab, Key, Types, Snmp, Items, Recs) ->
     Recs2 = prepare_snmp(Tid, Tab, Key, Types, Snmp, Items, Recs), % May exit
-    Recs3 = prepare_nodes(Tid, Types, Items, Recs2, normal),
-    dbg_out("do prepare_items Rec3: ~p ~p ~p ~p~n", [Tid, Types, Items, Recs2]),
-    case mnesia_monitor:get_env(causal) of
-        true ->
-            dbg_out("applying causal delivery~n", []),
-            prepare_ts(Recs3);
-        false ->
-            Recs3
-    end.
+    prepare_nodes(Tid, Types, Items, Recs2, normal).
 
 needs_majority(Tab, #prep{majority = M}) ->
     case lists:keymember(Tab, 1, M) of
@@ -1322,42 +1314,6 @@ prepare_nodes(Tid, [{Node, Storage} | Rest], Items, C, Kind) ->
 prepare_nodes(_Tid, [], _Items, CommitRecords, _Kind) ->
     CommitRecords.
 
--spec prepare_ts([#commit{}]) -> [#commit{}].
-prepare_ts(Recs) ->
-    {Node, Ts} = mnesia_causal:send_msg(),
-    do_prepare_ts(Recs, Ts, Node).
-
-%% Returns a list of commit record, with node and ts set
-do_prepare_ts([Hd | Tl], Ts, Node) ->
-    % TODO can delete the ts from the commit record
-    % TODO we only add ts to ext copies for now, since no need of causal delivery
-    % for other copies
-    Commit = Hd#commit{ts = Ts, sender = Node},
-    ExtCopiesWithTime =
-        case Commit#commit.ext of
-            [{ext_copies, ExtCopies}] ->
-                NewExtCopies = [add_time(ExtCopy, Commit) || ExtCopy <- ExtCopies],
-                [{ext_copies, NewExtCopies}];
-            [] ->
-                []
-        end,
-    Commit2 = Commit#commit{ext = ExtCopiesWithTime},
-    [Commit2 | do_prepare_ts(Tl, Ts, Node)];
-do_prepare_ts([], _Ts, _Node) ->
-    [].
-
-add_time({ExtInfo = {ext, porset_copies, mnesia_porset}, {Oid, Val, write}}, Commit) ->
-    {ExtInfo, {Oid, {Val, Commit#commit.ts}, write}};
-add_time({ExtInfo = {ext, porset_copies, mnesia_porset},
-          {_Oid = {Tab, Key}, Val, delete}},
-         Commit) ->
-    {ExtInfo, {{Tab, {Key, Commit#commit.ts}}, Val, delete}};
-add_time({ExtInfo = {ext, porset_copies, mnesia_porset}, {Oid, Val, Op}}, Commit) ->
-    {ExtInfo, {Oid, {Val, Commit#commit.ts}, Op}};
-add_time(ExtCopy, _Commit) ->
-    % adding time to each element in the commit is porset specific
-    ExtCopy.
-
 pick_node(Tid, Node, [Rec | Rest], Done) ->
     if Rec#commit.node == Node ->
            {Rec, Done ++ Rest};
@@ -1365,6 +1321,8 @@ pick_node(Tid, Node, [Rec | Rest], Done) ->
            pick_node(Tid, Node, Rest, [Rec | Done])
     end;
 pick_node({dirty, _}, Node, [], Done) ->
+    {#commit{decision = presume_commit, node = Node}, Done};
+pick_node({ec, _}, Node, [], Done) ->
     {#commit{decision = presume_commit, node = Node}, Done};
 pick_node(_Tid, Node, [], _Done) ->
     mnesia:abort({bad_commit, {missing_lock, Node}}).
@@ -2036,32 +1994,6 @@ sync_send_dirty(Tid, [Head | Tail], Tab, WaitFor) ->
 sync_send_dirty(_Tid, [], _Tab, WaitFor) ->
     {WaitFor, {'EXIT', {aborted, {node_not_running, WaitFor}}}}.
 
-receive_msg(Tid, Commit, Tab, true) ->
-    do_receive_msg(Tid, Commit, Tab),
-    do_dirty(Tid, Commit);
-receive_msg(Tid, Commit, Tab, false) ->
-    case do_receive_msg(Tid, Commit, Tab) of
-        true ->
-            do_async_dirty(Tid, new_cr_format(Commit), Tab);
-        false ->
-            ok
-    end.
-
-do_receive_msg(Tid, Commit, Tab) ->
-    case mnesia_monitor:get_env(causal) of
-        true ->
-            D = mnesia_causal:rcv_msg(Tid, Commit, Tab),
-            {Deliverable, Local} = lists:partition(fun(DInfo) -> DInfo =/= {Tid, Commit, Tab} end, D),
-            lists:foreach(fun({_Tid, C, _Tab}) -> dbg_out("Deliverable Commit ~p~n", [C]) end, D),
-            lists:foreach(fun({Tid1, Commit1, Tab1}) ->
-                             do_async_dirty(Tid1, new_cr_format(Commit1), Tab1)
-                          end,
-                          Deliverable),
-            length(Local) > 0;
-        false ->
-            false
-    end.
-
 %% Returns {WaitFor, Res}
 async_send_dirty(_Tid, _Nodes, Tab, nowhere) ->
     {[], {'EXIT', {aborted, {no_exists, Tab}}}};
@@ -2069,27 +2001,16 @@ async_send_dirty(Tid, Nodes, Tab, ReadNode) ->
     async_send_dirty(Tid, Nodes, Tab, ReadNode, [], ok).
 
 async_send_dirty(Tid, [Head | Tail], Tab, ReadNode, WaitFor, Res) ->
-    dbg_out("async_send_dirty Nodes: ~p~n", [[Head | Tail]]),
     Node = Head#commit.node,
     if ReadNode == Node, Node == node() ->
-           NewRes = receive_msg(Tid, Head, Tab, true),
-           %    NewRes = do_dirty(Tid, Head),
+           NewRes = do_dirty(Tid, Head),
            async_send_dirty(Tid, Tail, Tab, ReadNode, WaitFor, NewRes);
        ReadNode == Node ->
            {?MODULE, Node} ! {self(), {sync_dirty, Tid, Head, Tab}},
            NewRes = {'EXIT', {aborted, {node_not_running, Node}}},
            async_send_dirty(Tid, Tail, Tab, ReadNode, [Node | WaitFor], NewRes);
        true ->
-           if node() =:= 'b@127.0.0.1' andalso Node =:= 'a@127.0.0.1' ->
-                  spawn(fun() ->
-                           timer:sleep(500000),
-                           dbg_out("delaying sending from a to b~n", []),
-                           {?MODULE, Node} ! {self(), {async_dirty, Tid, Head, Tab}}
-                        end);
-              true ->
-                  {?MODULE, Node} ! {self(), {async_dirty, Tid, Head, Tab}}
-           end,
-           dbg_out("sending ~p to ~p~n", [{async_dirty, Tid, Head, Tab}, {?MODULE, Node}]),
+           {?MODULE, Node} ! {self(), {async_dirty, Tid, Head, Tab}},
            async_send_dirty(Tid, Tail, Tab, ReadNode, WaitFor, Res)
     end;
 async_send_dirty(_Tid, [], _Tab, _ReadNode, WaitFor, Res) ->

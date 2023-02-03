@@ -113,7 +113,7 @@
 		 ext = [],
 		 schema_ops = [],
          sender = node(),
-         ts = 0
+         ts = #{}
 		}).
 
 -record(decision, {tid,

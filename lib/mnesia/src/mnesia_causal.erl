@@ -6,6 +6,8 @@
 
 -include("mnesia.hrl").
 
+-import(mnesia_lib, [important/2, dbg_out/2]).
+
 -behaviour(gen_server).
 
 -type ord() :: lt | eq | gt | cc.
@@ -90,6 +92,7 @@ find_deliverable(MM, Delivered, Buf1) ->
 -spec do_find_deliverable(vclock(), [mmsg()], [mmsg()], [mmsg()]) ->
                              {vclock(), [mmsg()], [mmsg()]}.
 do_find_deliverable(Delivered, Buff, Buff, Deliverable) ->
+    [dbg_out("Deliverable Commit ~p~n", [C]) || {_Tid, C, _Tab} <- Deliverable],
     {Delivered, Buff, Deliverable};
 do_find_deliverable(Delivered, _OldBuff, Buff, Deliverable) ->
     {Dev, NDev} =
@@ -97,7 +100,9 @@ do_find_deliverable(Delivered, _OldBuff, Buff, Deliverable) ->
                            msg_deliverable(Deps, Delivered, Sender)
                         end,
                         Buff),
-    % IncredDev = lists:map(fun update_ts_at_dev/1, Dev),
+    dbg_out("node ~p non deliverable first 10 ~p~n", [node(), lists:sublist(NDev, 10)]),
+    dbg_out("node ~p non deliverable last 10 ~p~n current delivered ~p~n",
+            [node(), lists:sublist(NDev, max(length(NDev) - 11, 1), 10), Delivered]),
     NewDelivered =
         lists:foldl(fun(#mmsg{msg = #commit{sender = Sender}}, AccIn) -> increment(Sender, AccIn)
                     end,
@@ -123,6 +128,7 @@ msg_deliverable(Deps, Delivered, Sender) ->
 
 -spec new() -> vclock().
 new() ->
+    dbg_out("new clock with nodes ~p~n", [[node() | nodes()]]),
     maps:from_keys([node() | nodes()], 0).
 
 -spec increment(node(), vclock()) -> vclock().
