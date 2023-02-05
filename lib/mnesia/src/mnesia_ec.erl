@@ -5,10 +5,9 @@
 -import(mnesia_lib, [important/2, dbg_out/2, verbose/2]).
 
 -export([lock/4, write/5, delete/5, delete_object/5, read/5, match_object/5, all_keys/4,
-         first/3, last/3, prev/4, next/4, index_match_object/6, index_read/6, table_info/4]).
-
+         first/3, last/3, prev/4, next/4, index_match_object/6, index_read/6, table_info/4,
+         select/5]).
 -export([receive_msg/4]).
-
 -export([start/0, init/1]).
 
 -compile([nowarn_unused_vars]).
@@ -25,7 +24,6 @@
          types,
          majority = [],
          sync = false}).
-
 -record(state,
         {coordinators = gb_trees:empty(),
          participants = gb_trees:empty(),
@@ -33,17 +31,6 @@
          blocked_tabs = [],
          dirty_queue = [],
          fixed_tabs = []}).
-
-
-%% Local function in order to avoid external function call
-val(Var) ->
-    case ?catch_val_and_stack(Var) of
-        {'EXIT', Stacktrace} ->
-            mnesia_lib:other_val(Var, Stacktrace);
-        Value ->
-            Value
-    end.
-
 
 start() ->
     mnesia_monitor:start_proc(?MODULE, ?MODULE, init, [self()]).
@@ -54,7 +41,7 @@ init(Parent) ->
     process_flag(message_queue_data, off_heap),
     mnesia_monitor:set_env(causal, true),
 
-    case val(debug) of
+    case mnesia_tm:val(debug) of
         Debug when Debug /= debug, Debug /= trace ->
             ignore;
         _ ->
@@ -62,7 +49,6 @@ init(Parent) ->
     end,
     proc_lib:init_ack(Parent, {ok, self()}),
     doit_loop(#state{supervisor = Parent}).
-
 
 doit_loop(#state{coordinators = Coordinators,
                  participants = Participants,
@@ -80,38 +66,40 @@ doit_loop(#state{coordinators = Coordinators,
                     State2 = State#state{dirty_queue = [Item | State#state.dirty_queue]},
                     doit_loop(State2)
             end
-        end.
+    end.
 
 %% mnesia_access API
 %%
-lock({async_ec, _Pid}, Ts, LockItem, LockKind) ->
+lock({async_ec, _Pid}, _Ts, _LockItem, _LockKind) ->
     [];
 lock(Tid, Ts, LockItem, LockKind) ->
     mnesia:lock(Tid, Ts, LockItem, LockKind).
 
-write(Tid = {async_ec, _Pid}, Ts, Tab, Val, LockKind)
+write({async_ec, _Pid}, _Ts, Tab, Val, _LockKind)
     when is_atom(Tab), Tab /= schema, is_tuple(Val), tuple_size(Val) > 2 ->
     do_ec_write(async_ec, Tab, Val);
 write(Tid, Ts, Tab, Val, LockKind) ->
     mnesia:write(Tid, Ts, Tab, Val, LockKind).
 
-delete({async_ec, _Pid}, Ts, Tab, Key, LockKind) when is_atom(Tab), Tab /= schema ->
+delete({async_ec, _Pid}, Ts, Tab, Key, _LockKind) when is_atom(Tab), Tab /= schema ->
     do_ec_delete(async_ec, Tab, Key);
 delete(Tid, Ts, Tab, Val, LockKind) ->
     mnesia:delete(Tid, Ts, Tab, Val, LockKind).
 
 delete_object(Tid, Ts, Tab, Val, LockKind) ->
-    ok.    %     when is_atom(Tab), Tab /= schema, is_tuple(Val), tuple_size(Val) > 2 ->
-           %       case has_var(Val) of
-           %       false ->
-           %           do_delete_object(Tid, Ts, Tab, Val, LockKind);
-           %       true ->
-           %           abort({bad_type, Tab, Val})
-           %       end;
-           %   delete_object(_Tid, _Ts, Tab, _Key, _LockKind) ->
-           %       abort({bad_type, Tab}).
+    ok.
 
-read({async_ec, _Pid}, Ts, Tab, Key, LockKind) when is_atom(Tab), Tab /= schema ->
+        %    when is_atom(Tab), Tab /= schema, is_tuple(Val), tuple_size(Val) > 2 ->
+        %          case has_var(Val) of
+        %          false ->
+        %              do_delete_object(Tid, Ts, Tab, Val, LockKind);
+        %          true ->
+        %              abort({bad_type, Tab, Val})
+        %          end;
+        %      delete_object(_Tid, _Ts, Tab, _Key, _LockKind) ->
+        %          abort({bad_type, Tab}).
+
+read({async_ec, _Pid}, _Ts, Tab, Key, _LockKind) when is_atom(Tab), Tab /= schema ->
     ec_read(Tab, Key);
 read(_Tid, _Ts, Tab, _Key, _LockKind) ->
     mnesia:abort({bad_type, Tab}).
@@ -127,99 +115,41 @@ match_object(Tid, Ts, Tab, Pat, LockKind) ->
        %           match_object(_Tid, _Ts, Tab, Pat, _LockKind) ->
        %               abort({bad_type, Tab, Pat}).
 
-all_keys(Tid, Ts, Tab, LockKind) ->
-    ok.%               when is_atom(Tab), Tab /= schema ->
-       %                 Pat0 = val({Tab, wild_pattern}),
-       %                 Pat = setelement(2, Pat0, '$1'),
-       %                 Keys = select(Tid, Ts, Tab, [{Pat, [], ['$1']}], LockKind),
-       %                 case val({Tab, setorbag}) of
-       %                 bag ->
-       %                     mnesia_lib:uniq(Keys);
-       %                 _ ->
-       %                     Keys
-       %                 end;
-       %             all_keys(_Tid, _Ts, Tab, _LockKind) ->
-       %                 abort({bad_type, Tab}).
+all_keys({async_ec, _Pid} = Tid, Ts, Tab, LockKind) when is_atom(Tab), Tab /= schema ->
+    Pat0 = mnesia_tm:val({Tab, wild_pattern}),
+    Pat1 =
+        erlang:append_element(
+            erlang:append_element(Pat0, '_'), write),
+    Pat = setelement(2, Pat1, '$1'),
+    Keys = select(Tid, Ts, Tab, [{Pat, [], ['$1']}], LockKind),
+    case mnesia_tm:val({Tab, setorbag}) of
+        bag ->
+            mnesia_lib:uniq(Keys);
+        _ ->
+            Keys
+    end;
+all_keys(_Tid, _Ts, Tab, _LockKind) ->
+    mnesia:abort({bad_type, Tab}).
 
-first(Tid, Ts, Tab) ->
-    ok.%                 when is_atom(Tab), Tab /= schema ->
-       %                   case element(1, Tid) of
-       %                   ets ->
-       %                       ?ets_first(Tab);
-       %                   tid ->
-       %                       lock_table(Tid, Ts, Tab, read),
-       %                       do_fixtable(Tab,Ts),
-       %                       Key = dirty_first(Tab),
-       %                       stored_keys(Tab,Key,'$end_of_table',Ts,next,
-       %                           val({Tab, setorbag}));
-       %                   _Protocol ->
-       %                       dirty_first(Tab)
-       %                   end;
-       %               first(_Tid, _Ts,Tab) ->
-       %                   abort({bad_type, Tab}).
+first({async_ec, _Pid}, _Ts, Tab) when is_atom(Tab), Tab /= schema ->
+    ec_first(Tab);
+first(_Tid, _Ts, Tab) ->
+    mnesia:abort({bad_type, Tab}).
 
-last(Tid, Ts, Tab) ->
-    ok.
+last({async_ec, _Pid}, _Ts, Tab) when is_atom(Tab), Tab /= schema ->
+    ec_last(Tab);
+last(_Tid, _Ts, Tab) ->
+    mnesia:abort({bad_type, Tab}).
 
-%                   when is_atom(Tab), Tab /= schema ->
-%                     case element(1, Tid) of
-%                     ets ->
-%                         ?ets_last(Tab);
-%                     tid ->
-%                         lock_table(Tid, Ts, Tab, read),
-%                         do_fixtable(Tab,Ts),
-%                         Key = dirty_last(Tab),
-%                         stored_keys(Tab,Key,'$end_of_table',Ts,prev,
-%                             val({Tab, setorbag}));
-%                     _Protocol ->
-%                         dirty_last(Tab)
-%                     end;
-%                 last(_Tid, _Ts,Tab) ->
-%                     abort({bad_type, Tab}).
+prev({async_ec, _Pid}, _Ts, Tab, Key) when is_atom(Tab), Tab /= schema ->
+    ec_prev(Tab, Key);
+prev(_Tid, _Ts, Tab, _) ->
+    mnesia:abort({bad_type, Tab}).
 
-prev(Tid, Ts, Tab, Key) ->
-    ok.%                     when is_atom(Tab), Tab /= schema ->
-       %                       case element(1, Tid) of
-       %                       ets ->
-       %                           ?ets_prev(Tab,Key);
-       %                       tid ->
-       %                           lock_table(Tid, Ts, Tab, read),
-       %                           do_fixtable(Tab,Ts),
-       %                           New = ?CATCH(dirty_prev(Tab,Key)),
-       %                           stored_keys(Tab,New,Key,Ts,prev,
-       %                               val({Tab, setorbag}));
-       %                       _Protocol ->
-       %                           dirty_prev(Tab,Key)
-       %                       end;
-       %                   prev(_Tid, _Ts,Tab,_) ->
-       %                       abort({bad_type, Tab}).
-
-% -spec next(Tab::table(), Key::term()) -> NextKey::term().
-% next(Tab,Key) ->
-%                         case get(mnesia_activity_state) of
-%                         {?DEFAULT_ACCESS,Tid,Ts} ->
-%                             next(Tid,Ts,Tab,Key);
-%                         {Mod,Tid,Ts} ->
-%                             Mod:next(Tid,Ts,Tab,Key);
-%                         _ ->
-%                             abort(no_transaction)
-%                         end.
-next(Tid, Ts, Tab, Key) ->
-    ok.%                       when is_atom(Tab), Tab /= schema ->
-       %                         case element(1, Tid) of
-       %                         ets ->
-       %                             ?ets_next(Tab,Key);
-       %                         tid ->
-       %                             lock_table(Tid, Ts, Tab, read),
-       %                             do_fixtable(Tab,Ts),
-       %                             New = ?CATCH(dirty_next(Tab,Key)),
-       %                             stored_keys(Tab,New,Key,Ts,next,
-       %                                 val({Tab, setorbag}));
-       %                         _Protocol ->
-       %                             dirty_next(Tab,Key)
-       %                         end;
-       %                     next(_Tid, _Ts,Tab,_) ->
-       %                         abort({bad_type, Tab}).
+next({async_ec, _pid}, _Ts, Tab, Key) when is_atom(Tab), Tab /= schema ->
+    ec_next(Tab, Key);
+next(_Tid, _Ts, Tab, _) ->
+    mnesia:abort({bad_type, Tab}).
 
 index_match_object(Tid, Ts, Tab, Pat, Attr, LockKind) ->
     ok.%                         when is_atom(Tab), Tab /= schema, is_tuple(Pat), tuple_size(Pat) > 2 ->
@@ -284,8 +214,13 @@ index_read(Tid, Ts, Tab, Key, Attr, LockKind) ->
        %                         index_read(_Tid, _Ts, Tab, _Key, _Attr, _LockKind) ->
        %                             abort({bad_type, Tab}).
 
-table_info(_Tid, _Ts, Tab, Item) ->
-    ok.%                                 any_table_info(Tab, Item).
+select({async_ec, _Pid}, _Ts, Tab, Spec, _LockKind) ->
+    ec_select(Tab, Spec);
+select(Tid, Ts, Tab, Spec, LockKind) ->
+    mnesia:select(Tid, Ts, Tab, Spec, LockKind).
+
+table_info({asyn_ec, _Pid}, _Ts, Tab, Item) ->
+    mnesia:any_table_info(Tab, Item).
 
 %% Private functions, copied or modified from mnesia.erl and mnesia_tm.erl
 
@@ -312,7 +247,7 @@ ec(Protocol, Item) ->
     dbg_out("ec: ~p~n", [CR]),
     case Protocol of
         async_ec ->
-            ReadNode = val({Tab, where_to_read}),
+            ReadNode = mnesia_tm:val({Tab, where_to_read}),
             {WaitFor, FirstRes} = async_send_ec(Tid, CR, Tab, ReadNode),
             mnesia_tm:rec_dirty(WaitFor, FirstRes);
         _ ->
@@ -327,7 +262,7 @@ prepare_items(Tid, Tab, Key, Items, Prep) when Prep#prep.prev_tab == Tab ->
     Recs2 = do_prepare_items(Tid, Tab, Key, Types, Snmp, Items, Recs),
     Prep#prep{records = Recs2};
 prepare_items(Tid, Tab, Key, Items, Prep) ->
-    Types = val({Tab, where_to_commit}),
+    Types = mnesia_tm:val({Tab, where_to_commit}),
     case Types of
         [] ->
             mnesia:abort({no_exists, Tab});
@@ -336,7 +271,7 @@ prepare_items(Tid, Tab, Key, Items, Prep) ->
             prepare_items(Tid, Tab, Key, Items, Prep);
         _ ->
             Majority = mnesia_tm:needs_majority(Tab, Prep),
-            Snmp = val({Tab, snmp}),
+            Snmp = mnesia_tm:val({Tab, snmp}),
             Recs2 = do_prepare_items(Tid, Tab, Key, Types, Snmp, Items, Prep#prep.records),
             Prep2 =
                 Prep#prep{records = Recs2,
@@ -369,6 +304,7 @@ req(R) ->
             Pid ! {{self(), Ref}, R},
             rec(Pid, Ref)
     end.
+
 rec(Pid, Ref) ->
     receive
         {?MODULE, Ref, Reply} ->
@@ -396,19 +332,20 @@ prepare_ts(Recs) ->
     do_prepare_ts(lists:reverse(Recs), Node, Ts).
 
 %% Returns a list of commit record, with node and ts set
--spec do_prepare_ts([#commit{}], node(), mnesia_causal:vclock()) -> [#commit{sender::atom()}].
+-spec do_prepare_ts([#commit{}], node(), mnesia_causal:vclock()) ->
+                       [#commit{sender :: atom()}].
 do_prepare_ts([Hd | Tl], Node, Ts) ->
     % we only add ts once, since we consider all copies in a commit as a whole
     Commit = Hd#commit{sender = Node, ts = Ts},
     [Commit | do_prepare_ts(Tl, Node, Ts)];
-    % Commit1 = Commit#commit{ram_copies = do_update_ts(ram_copies, Commit#commit.ram_copies)},
-    % Commit2 =
-    %     Commit#commit{disc_copies = do_update_ts(disc_copies, Commit1#commit.disc_copies)},
-    % Commit3 =
-    %     Commit#commit{disc_only_copies =
-    %                       do_update_ts(disc_only_copies, Commit2#commit.disc_only_copies)},
-    % Commit4 = Commit#commit{ext = do_update_ts(ext, Commit3#commit.ext)},
-    % [Commit4 | do_prepare_ts(Tl, Node)];
+% Commit1 = Commit#commit{ram_copies = do_update_ts(ram_copies, Commit#commit.ram_copies)},
+% Commit2 =
+%     Commit#commit{disc_copies = do_update_ts(disc_copies, Commit1#commit.disc_copies)},
+% Commit3 =
+%     Commit#commit{disc_only_copies =
+%                       do_update_ts(disc_only_copies, Commit2#commit.disc_only_copies)},
+% Commit4 = Commit#commit{ext = do_update_ts(ext, Commit3#commit.ext)},
+% [Commit4 | do_prepare_ts(Tl, Node)];
 do_prepare_ts([], _Node, _Ts) ->
     [].
 
@@ -421,14 +358,14 @@ do_update_ts(disc_only_copies, Copies, Ts) ->
     Copies;
 do_update_ts(ext, ExtCopies, Ts) ->
     ExtCopies;
-    % {_Node, Ts} = mnesia_causal:send_msg(),
-    % case ExtCopies of
-    %     [{ext_copies, Copies}] ->
-    %         NewExtCopies = [add_time(Copy, Ts) || Copy <- Copies],
-    %         [{ext_copies, NewExtCopies}];
-    %     Other ->
-    %         Other
-    % end;
+% {_Node, Ts} = mnesia_causal:send_msg(),
+% case ExtCopies of
+%     [{ext_copies, Copies}] ->
+%         NewExtCopies = [add_time(Copy, Ts) || Copy <- Copies],
+%         [{ext_copies, NewExtCopies}];
+%     Other ->
+%         Other
+% end;
 do_update_ts(Storage, Copies, Ts) ->
     mnesia:abort({bad_storage, Storage}).
 
@@ -545,8 +482,6 @@ do_update_ext(Tid, Ext, OldRes) ->
             Do = fun({{ext, _, _} = Storage, Op}, R) -> do_update(Tid, Storage, [Op], R) end,
             lists:foldl(Do, OldRes, Ops)
     end.
-
-
 
 %% Update the items
 do_update(Tid, Storage, [Op | Ops], OldRes) ->
@@ -667,3 +602,18 @@ commit_clear([H | R], Tid, Storage, Tab, K, Obj) when element(1, H) == index ->
 
 ec_read(Tab, Key) ->
     mnesia_porset:db_get(Tab, Key).
+
+ec_select(Tab, Spec) ->
+    mnesia_porset:db_select(Tab, Spec).
+
+ec_first(Tab) ->
+    mnesia_porset:db_first(Tab).
+
+ec_last(Tab) ->
+    mnesia_porset:db_last(Tab).
+
+ec_prev(Tab, Key) ->
+    mnesia_porset:db_prev_key(Tab, Key).
+
+ec_next(Tab, Key) ->
+    mnesia_porset:db_next_key(Tab, Key).

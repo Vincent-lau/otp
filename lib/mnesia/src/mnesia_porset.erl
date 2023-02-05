@@ -1,4 +1,4 @@
-%%
+%
 %% %CopyrightBegin%
 %%
 %% Copyright Ericsson AB 1996-2022. All Rights Reserved.
@@ -20,7 +20,8 @@
 
 -module(mnesia_porset).
 
--export([db_put/3, db_erase/3, db_get/2]).
+-export([db_put/3, db_erase/3, db_get/2, db_first/1, db_last_key/1, db_next_key/2,
+         db_select/2, db_prev/2]).
 
 -define(DEBUG, 1).
 
@@ -216,6 +217,10 @@ match_delete(porset_copies, Tab, Pat) ->
     ets:match_delete(
         mnesia_lib:val({?MODULE, Tab}), Pat).
 
+db_first(Tab) ->
+    dbg_out("running my own first function on ~p~n", [Tab]),
+    mnesia_lib:db_first(Tab).
+
 first(porset_copies, Tab) ->
     ets:first(
         mnesia_lib:val({?MODULE, Tab})).
@@ -223,9 +228,21 @@ first(porset_copies, Tab) ->
 last(Alias, Tab) ->
     first(Alias, Tab).
 
+db_last_key(Tab) ->
+    dbg_out("running my own last function on ~p~n", [Tab]),
+    mnesia_lib:db_last(Tab).
+
+db_next_key(Tab, Key) ->
+    dbg_out("running my own next function on ~p", [Tab]),
+    mnesia_lib:db_next_key(Tab, Key).
+
 next(porset_copies, Tab, Key) ->
     ets:next(
         mnesia_lib:val({?MODULE, Tab}), Key).
+
+db_prev(Tab, Key) ->
+    dbg_out("running my own prev function on ~p", [Tab]),
+    mnesia_lib:db_prev_key(Tab, Key).
 
 prev(Alias, Tab, Key) ->
     next(Alias, Tab, Key).
@@ -237,6 +254,11 @@ slot(porset_copies, Tab, Pos) ->
 update_counter(porset_copies, Tab, C, Val) ->
     ets:update_counter(
         mnesia_lib:val({?MODULE, Tab}), C, Val).
+
+db_select(Tab, Spec) ->
+    Res = mnesia_lib:db_select(Tab, Spec),
+    dbg_out("running my own select function on ~p with spec ~p got ~p", [Tab, Spec, Res]),
+    Res.
 
 select('$end_of_table' = End) ->
     End;
