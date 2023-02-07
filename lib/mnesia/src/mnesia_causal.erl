@@ -6,7 +6,7 @@
 
 -include("mnesia.hrl").
 
--import(mnesia_lib, [important/2, dbg_out/2]).
+-import(mnesia_lib, [important/2, dbg_out/2, verbose/2]).
 
 -behaviour(gen_server).
 
@@ -100,8 +100,8 @@ do_find_deliverable(Delivered, _OldBuff, Buff, Deliverable) ->
                            msg_deliverable(Deps, Delivered, Sender)
                         end,
                         Buff),
-    dbg_out("node ~p non deliverable first 10 ~p~n", [node(), lists:sublist(NDev, 10)]),
-    dbg_out("node ~p non deliverable last 10 ~p~n current delivered ~p~n",
+    verbose("node ~p non deliverable first 10 ~p~n", [node(), lists:sublist(NDev, 10)]),
+    verbose("node ~p non deliverable last 10 ~p~n current delivered ~p~n",
             [node(), lists:sublist(NDev, max(length(NDev) - 11, 1), 10), Delivered]),
     NewDelivered =
         lists:foldl(fun(#mmsg{msg = #commit{sender = Sender}}, AccIn) -> increment(Sender, AccIn)

@@ -20,8 +20,11 @@
 
 -module(mnesia_porset).
 
+-include("mnesia.hrl").
+
 -export([db_put/3, db_erase/3, db_get/2, db_first/1, db_last_key/1, db_next_key/2,
          db_select/2, db_prev/2]).
+-export([mktab/2, unsafe_mktab/2]).
 
 -define(DEBUG, 1).
 
@@ -47,129 +50,31 @@
 
 -compile([nowarn_unused_function]).
 
+val(Var) ->
+    case ?catch_val_and_stack(Var) of
+        {'EXIT', Stacktrace} ->
+            mnesia_lib:other_val(Var, Stacktrace);
+        Value ->
+            Value
+    end.
+
 %% types() ->
 %%     [{fs_copies, ?MODULE},
 %%      {raw_fs_copies, ?MODULE}].
 
-%%% convenience functions
+mktab(Tab, [{keypos, 2}, public, named_table, porset | EtsOpts]) ->
+    Args1 = [{keypos, 2}, public, named_table, bag | EtsOpts],
+    {Tab1, _Tab2} = porset_name(Tab),
+    mnesia_monitor:mktab(Tab1, Args1).
 
-create_schema(Nodes, Aliases) when is_list(Nodes), is_list(Aliases) ->
-    mnesia:create_schema(Nodes, [{backend_types, [{A, ?MODULE} || A <- Aliases]}]).
+unsafe_mktab(Tab, [{keypos, 2}, public, named_table, porset | EtsOpts]) ->
+    Args1 = [{keypos, 2}, public, named_table, bag | EtsOpts],
+    {Tab1, _Tab2} = porset_name(Tab),
+    mnesia_monitor:unsafe_mktab(Tab1, Args1).
 
-%% Table operations
+porset_name(Tab) ->
+    {list_to_atom(atom_to_list(Tab)), list_to_atom(atom_to_list(Tab) ++ "_tlog")}.
 
-check_definition(porset_copies, _Tab, _Nodes, _Props) ->
-    dbg_out("~p ~p ~p~n", [_Tab, _Nodes, _Props]),
-    ok.
-
-create_table(porset_copies, Tab, Props) when is_atom(Tab) ->
-    Tid = ets:new(Tab, [public, bag, {keypos, 2}]),
-    % Tid = ets:whereis(Name),
-    dbg_out("table created 1: ~p with tid ~p and prop ~p~n", [Tab, Tid, Props]),
-    mnesia_lib:set({?MODULE, Tab}, Tid),
-    ok;
-create_table(_, Tag = {Tab, index, {_Where, Type0}}, _Opts) ->
-    Type =
-        case Type0 of
-            ordered ->
-                ordered_set;
-            _ ->
-                Type0
-        end,
-    Tid = ets:new(Tab, [public, Type]),
-    dbg_out("table created 2: tag ~p", [Tag]),
-    mnesia_lib:set({?MODULE, Tag}, Tid),
-    ok;
-create_table(_, Tag = {_Tab, retainer, ChkPName}, _Opts) ->
-    Tid = ets:new(ChkPName, [bag, public, {keypos, 2}]),
-    dbg_out("table created 3: ~p(~p) ~p", [_Tab, Tid, Tag]),
-    mnesia_lib:set({?MODULE, Tag}, Tid),
-    ok.
-
-delete_table(porset_copies, Tab) ->
-    try
-        ets:delete(
-            mnesia_lib:val({?MODULE, Tab})),
-        mnesia_lib:unset({?MODULE, Tab}),
-        ok
-    catch
-        _:_ ->
-            ?DBG({double_delete, Tab}),
-            ok
-    end.
-
-load_table(porset_copies, _Tab, init_index, _Cs) ->
-    ok;
-load_table(porset_copies, _Tab, _LoadReason, _Cs) ->
-    ?DBG("Load ~p ~p~n", [_Tab, _LoadReason]),
-    ok.
-
-%%     mnesia_monitor:unsafe_create_external(Tab, porset_copies, ?MODULE, Cs).
-
-sender_init(Alias, Tab, _RemoteStorage, _Pid) ->
-    KeysPerTransfer = 100,
-    {standard,
-     fun() -> mnesia_lib:db_init_chunk({ext, Alias, ?MODULE}, Tab, KeysPerTransfer) end,
-     fun(Cont) -> mnesia_lib:db_chunk({ext, Alias, ?MODULE}, Cont) end}.
-
-receiver_first_message(Sender, {first, Size}, _Alias, Tab) ->
-    ?DBG({first, Size}),
-    {Size, {Tab, Sender}}.
-
-receive_data(Data, porset_copies, Name, Sender, {Name, Tab, Sender} = State) ->
-    ?DBG({Data, State}),
-    true = ets:insert(Tab, Data),
-    {more, State};
-receive_data(Data, Alias, Tab, Sender, {Name, Sender}) ->
-    receive_data(Data, Alias, Tab, Sender, {Name, mnesia_lib:val({?MODULE, Tab}), Sender}).
-
-receive_done(_Alias, _Tab, _Sender, _State) ->
-    ?DBG({done, _State}),
-    ok.
-
-close_table(Alias, Tab) ->
-    sync_close_table(Alias, Tab).
-
-sync_close_table(porset_copies, _Tab) ->
-    ?DBG(_Tab).
-
-fixtable(porset_copies, Tab, Bool) ->
-    ?DBG({Tab, Bool}),
-    ets:safe_fixtable(
-        mnesia_lib:val({?MODULE, Tab}), Bool).
-
-info(porset_copies, Tab, Type) ->
-    ?DBG({Tab, Type}),
-    Tid = mnesia_lib:val({?MODULE, Tab}),
-    try ets:info(Tid, Type) of
-        Val ->
-            Val
-    catch
-        _:_ ->
-            undefined
-    end.
-
-real_suffixes() ->
-    [".dat"].
-
-tmp_suffixes() ->
-    [].
-
-%% Index
-
-index_is_consistent(_Alias, _Ix, _Bool) ->
-    ok.  % Ignore for now
-
-is_index_consistent(_Alias, _Ix) ->
-    false.      % Always rebuild
-
-%% Record operations
-
-validate_record(_Alias, _Tab, RecName, Arity, Type, _Obj) ->
-    {RecName, Arity, Type}.
-
-validate_key(_Alias, _Tab, RecName, Arity, Type, _Key) ->
-    {RecName, Arity, Type}.
 
 -spec effect(storage(), mnesia:table(), tuple()) -> ok.
 effect(Storage, Tab, Tup) ->
@@ -182,22 +87,36 @@ effect(Storage, Tab, Tup) ->
             ok
     end.
 
-db_put(Storage, Tab, {Obj, Ts}) ->
+db_put(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
+    maybe_create_index(Tab, tuple_size(Obj) + 1),
+    Ts = element(tuple_size(Obj), Obj),
     dbg_out("running my own insert function and table ~p with val ~p and "
             "ts ~p~n",
             [Tab, Obj, Ts]),
     try
-        Tup = add_meta(Obj, Ts, write),
+        Tup = add_op(Obj, write),
         dbg_out("inserting ~p into ~p~n", [Tup, Tab]),
         effect(Storage, Tab, Tup)
     catch
         _:Reason ->
             warning("CRASH ~p ~p~n", [Reason, Tab])
+    end;
+db_put(_S, _T, Obj) ->
+    error("bad tuple ~p, no ts at the end~n", [Obj]).
+
+% TODO this might impact performance
+maybe_create_index(Tab, Index) ->
+    Indices = val({Tab, index}),
+    case lists:member(Index, Indices) of
+        true ->
+            ok;
+        false ->
+            mnesia:add_table_index(Tab, Index)
     end.
 
 db_get(Tab, Key) ->
     Res = mnesia_lib:db_get(Tab, Key),
-    dbg_out("running my own lookup function on ~p, got ~p", [Tab, Res]),
+    dbg_out("running my own lookup function on ~p, got ~p~n", [Tab, Res]),
     lists:filtermap(fun(Tup) ->
                        case tup_is_write(Tup) of
                            false -> false;
@@ -206,12 +125,15 @@ db_get(Tab, Key) ->
                     end,
                     Res).
 
-db_erase(Storage, Tab, {Obj, Ts}) ->
+db_erase(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
+    Ts = element(tuple_size(Obj), Obj),
     dbg_out("running my own delete function and table ~p with val ~p and "
             "ts ~p~n",
             [Tab, Obj, Ts]),
-    Tup = add_meta(Obj, Ts, delete),
-    effect(Storage, Tab, Tup).
+    Tup = add_op(Obj, delete),
+    effect(Storage, Tab, Tup);
+db_erase(_S, _T, Obj) ->
+    error("bad tuple ~p, no ts at the end~n", [Obj]).
 
 match_delete(porset_copies, Tab, Pat) ->
     ets:match_delete(
@@ -303,28 +225,13 @@ redundant(_Storage, _Tab, {_Ts, {delete, _Val}}) ->
     dbg_out("element is a delete, redundant", []),
     true;
 redundant(Storage, Tab, Ele) ->
-    dbg_out("checking redundancy", []),
+    dbg_out("checking redundancy~n", []),
     Key = get_val_key(get_val_ele(Ele)),
     Tups = mnesia_lib:db_get(Storage, Tab, Key),
     dbg_out("found ~p~n", [Tups]),
     Eles2 = lists:map(fun obj2ele/1, Tups),
     dbg_out("generated ~p~n", [Eles2]),
-    lists:any(fun(Ele2) -> obsolete(Ele, Ele2) end, Eles2).
-
-% check_redundant(_Tab, '$end_of_table', _E) ->
-%     dbg_out("element ~p is not redundant", [_E]),
-%     false;
-% check_redundant(Tab, Key, Ele1) ->
-%     NextKey = next(porset_copies, Tab, Key),
-%     % guaranteed to return a value since we are iterating over all keys
-%     Tups =
-%         ets:lookup(
-%             mnesia_lib:val({?MODULE, Tab}), Key),
-%     dbg_out("found ~p~n", [Tups]),
-%     Eles2 = lists:map(fun obj2ele/1, Tups),
-%     dbg_out("generated ~p~n", [Eles2]),
-%     lists:any(fun(Ele2) -> obsolete(Ele1, Ele2) end, Eles2)
-%     orelse check_redundant(Tab, NextKey, Ele1).
+    lists:any(fun(Ele2) -> obsolete(Tab, Ele, Ele2) end, Eles2).
 
 % TODO there might be better ways of doing the scan
 %% removes elements that are obsoleted by Ele
@@ -332,46 +239,16 @@ redundant(Storage, Tab, Ele) ->
 %% the same key as Ele, no need to go through the entire table
 -spec remove_obsolete(storage(), mnesia:table(), element()) -> ok.
 remove_obsolete(Storage, Tab, Ele) ->
-    dbg_out("checking obsolete", []),
+    dbg_out("checking obsolete~n", []),
     Key = get_val_key(get_val_ele(Ele)),
     dbg_out("key ~p~n", [Key]),
     Tups = mnesia_lib:db_get(Storage, Tab, Key),
     dbg_out("existing tuples ~p~n", [Tups]),
     mnesia_lib:db_erase(Storage, Tab, Key),
-    Keep = lists:filter(fun(Tup) -> not obsolete(obj2ele(Tup), Ele) end, Tups),
+    Keep = lists:filter(fun(Tup) -> not obsolete(Tab, obj2ele(Tup), Ele) end, Tups),
     dbg_out("removed obsolete ~p kept ~p~n", [Tups -- Keep, Keep]),
     mnesia_lib:db_put(Storage, Tab, Keep),
     ok.
-
-    % do_remove_obsolete(Tab, first(porset_copies, Tab), Ele).
-
-% -spec do_remove_obsolete(mnesia:table(), term(), element()) -> ok.
-% do_remove_obsolete(_Tab, '$end_of_table', _E) ->
-%     dbg_out("done removing obsolete"),
-%     ok;
-% do_remove_obsolete(Tab, Key, Ele2) ->
-%     NextKey = next(porset_copies, Tab, Key),
-%     % it's possible to have mutliple tuples since the store is keyed by ts
-%     Tups =
-%         ets:lookup(
-%             mnesia_lib:val({?MODULE, Tab}), Key),
-%     dbg_out("found ~p~n", [Tups]),
-%     Eles1 = lists:map(fun obj2ele/1, Tups),
-%     dbg_out("generated ~p, input ele ~p~n", [Eles1, Ele2]),
-%     Keep =
-%         lists:filtermap(fun(Ele1) ->
-%                            case obsolete(Ele1, Ele2) of
-%                                true -> false;
-%                                false -> {true, ele2obj(Ele1)}
-%                            end
-%                         end,
-%                         Eles1),
-%     dbg_out("removed obsolete ~p kept ~p~n", [Tups -- Keep, Keep]),
-%     ets:delete(
-%         mnesia_lib:val({?MODULE, Tab}), Key),
-%     ets:insert(
-%         mnesia_lib:val({?MODULE, Tab}), Keep),
-%     do_remove_obsolete(Tab, NextKey, Ele2).
 
 %%% Helper
 
@@ -393,19 +270,24 @@ get_val_tup(Obj) ->
     delete_meta(Obj).
 
 %% @returns true if second element obsoletes the first one
--spec obsolete({ts(), {op(), val()}}, {ts(), {op(), val()}}) -> boolean().
-obsolete({Ts1, {write, V1}}, {Ts2, {write, V2}}) ->
-    equals(V1, V2) andalso mnesia_causal:compare_vclock(Ts1, Ts2) =:= lt;
-obsolete({Ts1, {write, V1}}, {Ts2, {delete, V2}}) ->
-    dbg_out("equals ~p~n", [equals(V1, V2)]),
-    dbg_out("vclock V1~p V2~p ~p~n", [V1, V2, mnesia_causal:compare_vclock(Ts1, Ts2)]),
-    equals(V1, V2) andalso mnesia_causal:compare_vclock(Ts1, Ts2) =:= lt;
-obsolete({_Ts1, {delete, _V1}}, _X) ->
+-spec obsolete(mnesia:table(), {ts(), {op(), val()}}, {ts(), {op(), val()}}) -> boolean().
+obsolete(Tab, {Ts1, {write, V1}}, {Ts2, {write, V2}}) ->
+    equals(Tab, V1, V2) andalso mnesia_causal:compare_vclock(Ts1, Ts2) =:= lt;
+obsolete(Tab, {Ts1, {write, V1}}, {Ts2, {delete, V2}}) ->
+    equals(Tab, V1, V2) andalso mnesia_causal:compare_vclock(Ts1, Ts2) =:= lt;
+obsolete(_Tab, {_Ts1, {delete, _V1}}, _X) ->
     true.
 
--spec equals(tuple(), tuple()) -> boolean().
-equals(V1, V2) ->
-    element(key_pos(), V1) =:= element(key_pos(), V2).
+-spec equals(mnesia:table(), tuple(), tuple()) -> boolean().
+equals(Tab, V1, V2) ->
+    case val({Tab, setorbag}) of
+        porset ->
+            element(key_pos(), V1) =:= element(key_pos(), V2);
+        porbag ->
+            V1 =:= V2;
+        Other ->
+            error({bad_val, Other})
+    end.
 
 -spec get_val_key(tuple()) -> term().
 get_val_key(V) ->
@@ -414,6 +296,19 @@ get_val_key(V) ->
 -spec add_ts(tuple(), ts()) -> tuple().
 add_ts(Obj, Ts) ->
     erlang:append_element(Obj, Ts).
+
+% @doc this changes the tuple with the last element as the ts to the key
+% by {key, ts}, and the last element is now the key, which will be the index
+-spec transform_key(tuple()) -> tuple().
+transform_key(Obj) when is_map(element(tuple_size(Obj), Obj)) ->
+    K = erlang:element(key_pos(), Obj),
+    Ts = erlang:element(tuple_size(Obj), Obj),
+    O2 = setelement(key_pos(), Obj, {K, Ts}),
+    setelement(tuple_size(O2), Obj, K).
+
+-spec add_op(tuple(), op()) -> tuple().
+transform_meta(Obj, Op) ->
+    add_op(transform_key(Obj), Op).
 
 add_op(Obj, Op) ->
     erlang:append_element(Obj, Op).

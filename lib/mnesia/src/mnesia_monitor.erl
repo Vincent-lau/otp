@@ -99,8 +99,12 @@ init() ->
 mnesia_down(From, Node) ->
     cast({mnesia_down, From, Node}).
 
+mktab(Tab, Args = [_, _, _, porset | _]) ->
+    mnesia_porset:mktab(Tab, Args);
 mktab(Tab, Args) ->
     unsafe_call({mktab, Tab, Args}).
+unsafe_mktab(Tab, [_, _, _, porset | _] = Args) ->
+    mnesia_porset:unsafe_mktab(Tab, Args);
 unsafe_mktab(Tab, Args) ->
     unsafe_call({unsafe_mktab, Tab, Args}).
 
