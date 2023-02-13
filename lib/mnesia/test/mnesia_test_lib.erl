@@ -81,7 +81,7 @@
          test_driver/2, test_case_evaluator/3, activity_evaluator/1, flush/0, pick_msg/0,
          start_activities/1, start_transactions/1, start_transactions/2, start_sync_transactions/1,
          start_sync_transactions/2, sync_trans_tid_serial/1, prepare_test_case/5, select_nodes/4,
-         init_nodes/3, error/4, slave_start_link/0, slave_start_link/1, slave_sup/0,
+         init_nodes/3, init_nodes/4, error/4, slave_start_link/0, slave_start_link/1, slave_sup/0,
          start_mnesia/1, start_mnesia/2, start_appls/2, start_appls/3, start_wait/2,
          storage_type/2, stop_mnesia/1, stop_appls/2, sort/1, kill_mnesia/1, kill_appls/2,
          verify_mnesia/4, shutdown/0, verify_replica_location/5, lookup_config/2, sync_tables/2,
@@ -99,8 +99,7 @@ init_per_testcase(_Func, Config) ->
     Env = application:get_all_env(mnesia),
     [application:unset_env(mnesia, Key, [{timeout, infinity}])
      || {Key, _} <- Env, Key /= included_applications],
-    application:set_env(mnesia, causal, true), 
-    % application:set_env(mnesia, debug, debug), 
+    % application:set_env(mnesia, debug, debug),
     global:register_name(mnesia_global_logger, group_leader()),
     Config.
 
@@ -246,6 +245,45 @@ slave_sup() ->
             ignore
     end.
 
+port_proto_start(Host, Name) ->
+    Debug = atom_to_list(mnesia:system_info(debug)),
+    Prog = "../../../bin/erl ",
+    NewNode = list_to_atom(Name ++ "@" ++ Host),
+    Args =
+        "-mnesia debug "
+        ++ Debug
+        ++ " -pa "
+        ++ filename:dirname(
+               code:which(?MODULE))
+        ++ " -pa "
+        ++ filename:dirname(
+               code:which(mnesia))
+        ++ " -name "
+        ++ Name ++ "@" ++ Host
+        ++ " -setcookie "
+        ++ atom_to_list(erlang:get_cookie())
+        ++ " -pa "
+        ++ filename:dirname(
+               code:which(inet_tcp_proxy_dist))
+        ++ " -proto_dist inet_tcp_proxy",
+
+    Pid = erlang:open_port({spawn, Prog ++ Args}, []),
+    case is_port(Pid) of
+        true ->
+            ok;
+        false ->
+            error({error, Pid})
+    end,
+    timer:sleep(500),
+    ?match(pong, net_adm:ping(NewNode)),
+    {ok, Cwd} = file:get_cwd(),
+    Path = code:get_path(),
+    ok = rpc:call(NewNode, file, set_cwd, [Cwd]),
+    true = rpc:call(NewNode, code, set_path, [Path]),
+    ok = rpc:call(NewNode, error_logger, tty, [false]),
+    rpc:multicall([node() | nodes()], global, sync, []),
+    {ok, NewNode}.
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Index the test case structure
 
@@ -332,7 +370,8 @@ struct({Module, TestCase}, Indentation) when is_atom(Module), is_atom(TestCase) 
     log("~s{~p, ~p} ...~n", [Indentation, Module, TestCase]);
 struct({Module, TestCase, Other}, Indentation) when is_atom(Module), is_atom(TestCase) ->
     log("~s{~p, ~p} ~p~n", [Indentation, Module, TestCase, Other]);
-struct({Module, {group, GroupName}}, Indentation) when is_atom(Module), is_atom(GroupName) ->
+struct({Module, {group, GroupName}}, Indentation)
+    when is_atom(Module), is_atom(GroupName) ->
     log("~s{~p, {group, ~p}} ...~n", [Indentation, Module, GroupName]);
 struct([], _) ->
     ok;
@@ -619,7 +658,7 @@ do_prepare([], Selected, _All, _Config, _File, _Line) ->
     Selected;
 do_prepare([{init_test_case, Appls} | Actions], Selected, All, Config, File, Line) ->
     set_kill_timer(Config),
-    Started = init_nodes(Selected, File, Line),
+    Started = init_nodes(Selected, Config, File, Line),
     All2 = append_unique(Started, All),
     Alive = mnesia_lib:intersect(nodes() ++ [node()], All2),
     kill_appls(Appls, Alive),
@@ -730,23 +769,39 @@ pick_nodes(0, _Nodes, _File, _Line) ->
 pick_nodes(N, [], File, Line) ->
     ?skip("Test case (~p(~p)) ignored: ~p nodes missing~n", [File, Line, N]).
 
-init_nodes([Node | Nodes], File, Line) ->
+init_nodes(Nodes, File, Line) ->
+    init_nodes(Nodes, [], File, Line).
+
+init_nodes([Node | Nodes], Config, File, Line) ->
     case net_adm:ping(Node) of
         pong ->
-            [Node | init_nodes(Nodes, File, Line)];
+            [Node | init_nodes(Nodes, Config, File, Line)];
         pang ->
             [Name, Host] = node_to_name_and_host(Node),
-            case slave_start_link(Host, Name) of
-                {ok, Node1} ->
-                    Path = code:get_path(),
-                    true = rpc:call(Node1, code, set_path, [Path]),
-                    [Node1 | init_nodes(Nodes, File, Line)];
-                Other ->
-                    ?skip("Test case (~p(~p)) ignored: cannot start node ~p: ~p~n",
-                          [File, Line, Node, Other])
+            case lookup_config(is_port, Config) of
+                true ->
+                    case port_proto_start(Host, Name) of
+                        {ok, Node1} ->
+                            Path = code:get_path(),
+                            true = rpc:call(Node1, code, set_path, [Path]),
+                            [Node1 | init_nodes(Nodes, Config, File, Line)];
+                        Other ->
+                            ?skip("Test case (~p(~p)) ignored: cannot port start node ~p: ~p~n",
+                                  [File, Line, Node, Other])
+                    end;
+                false ->
+                    case slave_start_link(Host, Name) of
+                        {ok, Node1} ->
+                            Path = code:get_path(),
+                            true = rpc:call(Node1, code, set_path, [Path]),
+                            [Node1 | init_nodes(Nodes, Config, File, Line)];
+                        Other ->
+                            ?skip("Test case (~p(~p)) ignored: cannot slave start node ~p: ~p~n",
+                                  [File, Line, Node, Other])
+                    end
             end
     end;
-init_nodes([], _File, _Line) ->
+init_nodes([], _Config, _File, _Line) ->
     [].
 
 %% Returns [Name, Host]
@@ -877,7 +932,31 @@ start_wait_loop(Tabs) ->
 verify_nodes(Tabs) ->
     verify_nodes(Tabs, 0).
 
-verify_nodes ( [ ] , _ ) -> ok ; verify_nodes ( [ Tab | Tabs ] , N ) -> ? match ( X when is_atom ( X ) , mnesia_lib : val ( { Tab , where_to_read } ) ) , Nodes = mnesia : table_info ( Tab , where_to_write ) , Copies = mnesia : table_info ( Tab , disc_copies ) ++ mnesia : table_info ( Tab , disc_only_copies ) ++ mnesia : table_info ( Tab , ram_copies ) , Local = mnesia : table_info ( Tab , local_content ) , case Copies -- Nodes of [ ] -> verify_nodes ( Tabs , 0 ) ; _Else when Local == true , Nodes /= [ ] -> verify_nodes ( Tabs , 0 ) ; Else -> N2 = if N > 20 -> log ( "<>WARNING<> ~w Waiting for table: ~p on ~p ~n" , [ node ( ) , Tab , Else ] ) , 0 ; true -> N + 1 end , timer : sleep ( 500 ) , verify_nodes ( [ Tab | Tabs ] , N2 ) end .
+verify_nodes([], _) ->
+    ok;
+verify_nodes([Tab | Tabs], N) ->
+    ?match(X when is_atom(X), mnesia_lib:val({Tab, where_to_read})),
+    Nodes = mnesia:table_info(Tab, where_to_write),
+    Copies =
+        mnesia:table_info(Tab, disc_copies)
+        ++ mnesia:table_info(Tab, disc_only_copies)
+        ++ mnesia:table_info(Tab, ram_copies),
+    Local = mnesia:table_info(Tab, local_content),
+    case Copies -- Nodes of
+        [] ->
+            verify_nodes(Tabs, 0);
+        _Else when Local == true, Nodes /= [] ->
+            verify_nodes(Tabs, 0);
+        Else ->
+            N2 = if N > 20 ->
+                        log("<>WARNING<> ~w Waiting for table: ~p on ~p ~n", [node(), Tab, Else]),
+                        0;
+                    true ->
+                        N + 1
+                 end,
+            timer:sleep(500),
+            verify_nodes([Tab | Tabs], N2)
+    end.
 
 %% Nicely stop Mnesia on all given nodes
 %%
