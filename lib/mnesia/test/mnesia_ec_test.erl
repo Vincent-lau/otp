@@ -26,6 +26,10 @@
 -export([ec_rw_ram/1, ec_rw_compare_dirty_ram/1, ec_rwd_ram/1]).
 -export([update_trans/3]).
 
+init_per_testcase(ec_rw_ram, Config) ->
+    mnesia_test_lib:init_per_testcase(ec_rw_ram, [{is_port, true} | Config]);
+init_per_testcase(ec_rwd_ram, Config) ->
+    mnesia_test_lib:init_per_testcase(ec_rwd_ram, [{is_port, true} | Config]);
 init_per_testcase(Func, Conf) ->
     mnesia_test_lib:init_per_testcase(Func, Conf).
 
@@ -47,7 +51,7 @@ all() ->
 
 groups() ->
     [{ec_write, [], [ec_write_ram, ec_write_disc]},
-     {ec_read, [], [ec_read_ram, ec_read_disc]},
+     {ec_read, [], [ec_read_disc]},
      {ec_update_counter,
       [],
       [ec_update_counter_ram,
@@ -55,7 +59,7 @@ groups() ->
        ec_update_counter_disc_only,
        ec_update_counter_xets]},
      {ec_delete, [], [ec_delete_ram, ec_delete_disc]},
-     {ec_cc_crud, [], [ec_rw_ram]},
+     {ec_cc_crud, [], [ec_rw_ram, ec_rwd_ram, ec_rw_compare_dirty_ram]},
      {ec_delete_object,
       [],
       [ec_delete_object_ram,
@@ -105,8 +109,6 @@ groups() ->
        move_table_copy_3,
        move_table_copy_4]}].
 
-init_per_group(ec_cc_crud, Config) ->
-    [{is_port, true} | Config];
 init_per_group(_GroupName, Config) ->
     Config.
 
@@ -172,6 +174,7 @@ ec_rw(Config, Storage) ->
            % block connnection from NodeA1 to NodeA
            % if called at A1
            inet_tcp_proxy_dist:block(NodeA),
+           timer:sleep(500),
            mnesia:async_ec(Writer)
         end,
     spawn(NodeA1, BlockAndWrite),
@@ -206,32 +209,25 @@ ec_rwd(Config, Storage) ->
              lists:foreach(fun(N) -> mnesia:async_ec(fun() -> Writer(N, 4) end) end,
                            lists:seq(1, 20))
           end),
-    spawn(fun() ->
-             mnesia_rpc:call(NodeA1,
-                             lists,
-                             foreach,
-                             [fun(N) -> mnesia:async_ec(fun() -> Writer(N, 4) end) end,
-                              lists:seq(21, 30)])
-          end),
-    spawn(fun() ->
-             mnesia_rpc:call(NodeA2,
-                             lists,
-                             foreach,
-                             [fun(N) -> mnesia:async_ec(fun() -> Writer(N, 4) end) end,
-                              lists:seq(31, 40)])
-          end),
+    spawn(NodeA1, inet_tcp_proxy_dist, block, [NodeA2]),
+    WriteAndDelete =
+        fun() ->
+           lists:foreach(fun(N) -> mnesia:async_ec(fun() -> Writer(N, 4) end) end,
+                         lists:seq(21, 30)),
+           timer:sleep(1000),
+           lists:foreach(fun(N) -> mnesia:async_ec(fun() -> Deleter(N) end) end, lists:seq(25, 29))
+        end,
+    spawn(NodeA1, WriteAndDelete),
 
-    timer:sleep(1000),
-    spawn(fun() ->
-             mnesia_rpc:call(NodeA1,
-                             lists,
-                             foreach,
-                             [fun(N) -> mnesia:async_ec(fun() -> Deleter(N) end) end,
-                              lists:seq(20, 34)])
-          end),
+    spawn(NodeA2,
+          lists,
+          foreach,
+          [fun(N) -> mnesia:async_ec(fun() -> Writer(N, 4) end) end, lists:seq(31, 40)]),
 
-    timer:sleep(1000),
-    Res = lists:seq(1, 40) -- lists:seq(20, 34),
+    spawn(NodeA1, inet_tcp_proxy_dist, allow, [NodeA2]),
+
+    timer:sleep(2001),
+    Res = lists:seq(1, 40) -- lists:seq(25, 29),
     ?match(Res,
            lists:sort(
                mnesia:async_ec(fun() -> mnesia:all_keys(Tab) end))).
@@ -245,7 +241,7 @@ ec_rw_compare_dirty(Config, Storage) ->
     Nodes = [_NodeA, NodeA1, NodeA2] = ?acquire_nodes(3, Config),
     Tab1 = ec_rw,
     Tab2 = dirty_rw,
-    Def1 = [{Storage, Nodes}, {type, porset}, {attributes, [k, v]}],
+    Def1 = [{Storage, Nodes}, {attributes, [k, v]}],
     Def2 = [{Storage, Nodes}, {type, porset}, {attributes, [k, v]}],
     ?match({atomic, ok}, mnesia:create_table(Tab1, Def1)),
     ?match({atomic, ok}, mnesia:create_table(Tab2, Def2)),
@@ -288,16 +284,14 @@ ec_rw_compare_dirty(Config, Storage) ->
 
     timer:sleep(1000),
 
-    AllKeys =
+    DirtyKeys =
         lists:sort(
             mnesia:dirty_all_keys(Tab2)),
-    io:foramt("AllKeys on dirty table: ~p~n allkeys on ec table: ~p~n",
-              [AllKeys,
-               lists:sort(
-                   mnesia:async_ec(fun() -> mnesia:all_keys(Tab1) end))]),
-    ?match(AllKeys,
-           lists:sort(
-               mnesia:async_ec(fun() -> mnesia:all_keys(Tab1) end))).
+    EcKeys =
+        lists:sort(
+            mnesia:async_ec(fun() -> mnesia:all_keys(Tab1) end)),
+    io:format("AllKeys on dirty table: ~p~n allkeys on ec table: ~p~n", [DirtyKeys, EcKeys]),
+    ?match(DirtyKeys, EcKeys).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Write records ec

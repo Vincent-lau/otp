@@ -789,7 +789,7 @@ init_nodes([Node | Nodes], Config, File, Line) ->
                             ?skip("Test case (~p(~p)) ignored: cannot port start node ~p: ~p~n",
                                   [File, Line, Node, Other])
                     end;
-                false ->
+                _Other ->
                     case slave_start_link(Host, Name) of
                         {ok, Node1} ->
                             Path = code:get_path(),
