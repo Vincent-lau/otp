@@ -76,7 +76,7 @@ warmup_sticky(C) ->
     Fun = fun(S) ->
              {[Node | _], _, Wlock} = nearest_node(S, transaction, C),
              Stick = fun() -> [mnesia:read({T, S}, S, Wlock) || T <- Tabs] end,
-             Args = [transaction, Stick, [], mnesia_frag],
+             Args = [transaction, Stick, [], mnesia],
              rpc:call(Node, mnesia, activity, Args)
           end,
     Suffixes = lists:seq(0, C#config.n_fragments - 1), % Assume even distrib.
@@ -152,6 +152,12 @@ generator_init(Monitor, C) ->
     generator_loop(Monitor, C, SessionTab, Counters).
 
 %% Main loop for traffic generator
+-spec generator_loop(_,
+                     #config{},
+                     atom() | ets:tid(),
+                     {table, _} |
+                     {integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()}) ->
+                        no_return().
 generator_loop(Monitor, C, SessionTab, Counters) ->
     receive
         {ReplyTo, Ref, get_statistics} ->
@@ -181,9 +187,9 @@ generator_loop(Monitor, C, SessionTab, Counters) ->
             end,
             generator_loop(Monitor, C, SessionTab, Counters)
     after 0 ->
-        {Name, {Nodes, Activity, Wlock}, Fun, CommitSessions} = gen_trans(C, SessionTab),
+        {Name, {Nodes, Activity, Wlock}, Fun, CommitSessions} = gen_traffic(C, SessionTab),
         Before = erlang:monotonic_time(),
-        Res = call_worker(Nodes, Activity, Fun, Wlock, mnesia_frag),
+        Res = call_worker(Nodes, Activity, Fun, Wlock, mnesia),
         After = erlang:monotonic_time(),
         Elapsed = elapsed(Before, After),
         post_eval(Monitor, C, Elapsed, Res, Name, CommitSessions, SessionTab, Counters)
@@ -352,8 +358,8 @@ commit_session(no_fun) ->
 commit_session(Fun) when is_function(Fun, 0) ->
     Fun().
 
-%% Randlomly choose a transaction type according to benchmar spec
-gen_trans(C, SessionTab) when C#config.generator_profile == random ->
+%% Randlomly choose a transaction type according to benchmark spec
+gen_traffic(C, SessionTab) when C#config.generator_profile == random ->
     case rand:uniform(100) of
         Rand when Rand > 0, Rand =< 25 ->
             gen_t1(C, SessionTab);
@@ -366,7 +372,12 @@ gen_trans(C, SessionTab) when C#config.generator_profile == random ->
         Rand when Rand > 85, Rand =< 100 ->
             gen_t5(C, SessionTab)
     end;
-gen_trans(C, SessionTab) ->
+gen_traffic(C, SessionTab)
+    when C#config.generator_profile =:= async_ec
+         orelse C#config.generator_profile =:= async_dirty ->
+    Activity = C#config.generator_profile,
+    gen_async(C, SessionTab, Activity);
+gen_traffic(C, SessionTab) ->
     case C#config.generator_profile of
         t1 ->
             gen_t1(C, SessionTab);
@@ -381,6 +392,20 @@ gen_trans(C, SessionTab) ->
         ping ->
             gen_ping(C, SessionTab)
     end.
+
+gen_async(C, _SessionTab, AsyncAct)
+    when AsyncAct =:= async_dirty orelse AsyncAct =:= async_ec ->
+    SubscrId = rand:uniform(C#config.n_subscribers) - 1,
+    SubscrKey = bench_async:number_to_key(SubscrId, C),
+    Location = 4711,
+    ChangedBy = <<4711:(8 * 25)>>,
+    ChangedTime = <<4711:(8 * 25)>>,
+    {t1,
+     nearest_node(SubscrId, AsyncAct, C),
+     fun(Wlock) ->
+        bench_async:update_current_location(Wlock, SubscrKey, Location, ChangedBy, ChangedTime)
+     end,
+     no_fun}.
 
 gen_t1(C, _SessionTab) ->
     SubscrId = rand:uniform(C#config.n_subscribers) - 1,
@@ -498,6 +523,8 @@ gen_ping(C, _SessionTab) ->
      no_fun}.
 
 %% Select a node as near as the subscriber data as possible
+nearest_node(_SubscrId, Activity, C) when C#config.n_fragments == 1 ->
+    {[node()], Activity, write};
 nearest_node(SubscrId, Activity, C) ->
     Suffix = bench_trans:number_to_suffix(SubscrId),
     case mnesia_frag:table_info(t, s, {suffix, Suffix}, where_to_write) of
@@ -559,12 +586,19 @@ display_statistics(Stats, C) ->
     ?d("~n", []),
     ?d("Benchmark result...~n", []),
     ?d("~n", []),
-    ?d("    ~p transactions per second (TPS).~n", [catch NT * 1000000 * NG div AccMicros]),
-    ?d("    ~p TPS per table node.~n", [catch NT * 1000000 * NG div (AccMicros * NTN)]),
-    ?d("    ~p micro seconds in average per transaction, including "
-       "latency.~n",
-       [catch AccMicros div NT]),
-    ?d("    ~p transactions. ~f% generator overhead.~n", [NT, Overhead * 100]),
+    Kind =
+        case C#config.generator_profile of
+            async ->
+                async;
+            _Other ->
+                transaction
+        end,
+    ?d("    ~p ~ps per second (TPS).~n", [catch NT * 1000000 * NG div AccMicros, Kind]),
+    ?d("    ~p ~pPS per table node.~n",
+       [catch NT * 1000000 * NG div (AccMicros * NTN), Kind]),
+    ?d("    ~p micro seconds in average per ~p, including latency.~n",
+       [Kind, catch AccMicros div NT]),
+    ?d("    ~p ~p. ~f% generator overhead.~n", [NT, Kind, Overhead * 100]),
 
     TypeStats = calc_stats_per_tag(lists:keysort(1, FlatStats), 1, []),
     EvalNodeStats = calc_stats_per_tag(lists:keysort(3, FlatStats), 3, []),
@@ -573,17 +607,17 @@ display_statistics(Stats, C) ->
            ignore;
        true ->
            ?d("~n", []),
-           ?d("Statistics per transaction type...~n", []),
+           ?d("Statistics per ~p type...~n", [Kind]),
            ?d("~n", []),
            display_type_stats("    ", TypeStats, NT, AccMicros),
 
            ?d("~n", []),
-           ?d("Transaction statistics per table node...~n", []),
+           ?d("~p statistics per table node...~n", [Kind]),
            ?d("~n", []),
            display_calc_stats("    ", EvalNodeStats, NT, AccMicros),
 
            ?d("~n", []),
-           ?d("Transaction statistics per generator node...~n", []),
+           ?d("~p statistics per generator node...~n", [Kind]),
            ?d("~n", []),
            display_calc_stats("    ", GenNodeStats, NT, AccMicros)
     end,
@@ -600,7 +634,7 @@ display_statistics(Stats, C) ->
            display_trans_stats("    ", TypeStats, NT, AccMicros, NG),
            io:format("~n", []),
            io:format("  Overall Statistics~n", []),
-           io:format("     Transactions: ~p~n", [NT]),
+           io:format("     ~p: ~p~n", [Kind, NT]),
            io:format("     Inner       : ~p TPS~n", [catch NT * 1000000 * NG div AccMicros]),
            io:format("     Outer       : ~p TPS~n", [catch NT * 1000000 * NG div WallMicros]),
            io:format("~n", [])

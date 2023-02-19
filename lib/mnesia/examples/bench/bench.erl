@@ -43,11 +43,12 @@
 
 bind_schedulers() ->
     try
-        %% Avoid first core and bind schedules to the remaining ones
-	Topo = erlang:system_info(cpu_topology),
-	erlang:system_flag(cpu_topology,lists:reverse(Topo)),
-	%% N = erlang:system_info(schedulers),
-	%% erlang:system_flag(schedulers_online, lists:max([N - 1, 1])),
+        %% Avoid first core and bind schedulers to the remaining ones
+	[{processor, CoreTopo}] = erlang:system_info(cpu_topology),
+    NewTopo = [{processor, lists:reverse(CoreTopo)}],
+	erlang:system_flag(cpu_topology,NewTopo),
+	N = erlang:system_info(schedulers),
+	erlang:system_flag(schedulers_online, lists:max([N - 1, 1])),
 	erlang:system_flag(scheduler_bind_type, default_bind),
 	timer:sleep(timer:seconds(1)), % Wait for Rickard
 	erlang:system_info(scheduler_bindings)
@@ -244,6 +245,8 @@ verify_config([{Tag, Val} | T], C) ->
     case Tag of
         cookie when is_atom(Val) ->
             verify_config(T, C#config{cookie = Val});
+        generator_profile when Val == async ->
+            verify_config(T, C#config{generator_profile = Val});
         generator_profile when Val == random ->
             verify_config(T, C#config{generator_profile = Val});
         generator_profile when Val == t1 ->
