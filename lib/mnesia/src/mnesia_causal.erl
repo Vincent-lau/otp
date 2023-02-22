@@ -25,6 +25,7 @@
 start() ->
     gen_server:start({local, ?MODULE}, ?MODULE, [], []).
 
+-spec get_ts() -> vclock().
 get_ts() ->
     gen_server:call(?MODULE, get_ts).
 
@@ -65,7 +66,7 @@ init(_Args) ->
 handle_call(get_buf, _From, #state{buffer = Buffer} = State) ->
     {reply, Buffer, State};
 handle_call(get_ts, _From, #state{delivered = D} = State) ->
-    {reply, {D, erlang:system_time()}, State};
+    {reply, D, State};
 handle_call(send_msg, _From, State = #state{delivered = Delivered, send_seq = SendSeq}) ->
     Deps = Delivered#{node() := SendSeq + 1},
     {reply, {node(), Deps}, State#state{send_seq = SendSeq + 1}};
@@ -100,9 +101,9 @@ do_find_deliverable(Delivered, _OldBuff, Buff, Deliverable) ->
                            msg_deliverable(Deps, Delivered, Sender)
                         end,
                         Buff),
-    verbose("node ~p non deliverable first 10 ~p~n", [node(), lists:sublist(NDev, 10)]),
-    verbose("node ~p non deliverable last 10 ~p~n current delivered ~p~n",
-            [node(), lists:sublist(NDev, max(length(NDev) - 11, 1), 10), Delivered]),
+    verbose("non deliverable first 10 ~p~n", [lists:sublist(NDev, 10)]),
+    verbose("non deliverable last 10 ~p~n current delivered ~p~n",
+            [lists:sublist(NDev, max(length(NDev) - 11, 1), 10), Delivered]),
     NewDelivered =
         lists:foldl(fun(#mmsg{msg = #commit{sender = Sender}}, AccIn) -> increment(Sender, AccIn)
                     end,

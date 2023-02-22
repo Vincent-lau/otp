@@ -503,7 +503,7 @@ activity(Kind, Fun, Args, Mod) ->
 	ets ->                    non_transaction(State, Fun, Args, Kind, Mod);
 	async_dirty ->            non_transaction(State, Fun, Args, Kind, Mod);
 	sync_dirty ->             non_transaction(State, Fun, Args, Kind, Mod);
-    async_ec ->               non_transaction(State, Fun, Args, Kind, Mod);
+    async_ec ->               non_transaction(State, Fun, Args, Kind, mnesia_ec);
 	transaction ->            wrap_trans(State, Fun, Args, infinity, Mod, async);
 	{transaction, Retries} -> wrap_trans(State, Fun, Args, Retries, Mod, async);
 	sync_transaction ->            wrap_trans(State, Fun, Args, infinity, Mod, sync);
