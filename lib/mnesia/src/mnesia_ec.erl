@@ -2,7 +2,7 @@
 
 -include("mnesia.hrl").
 
--import(mnesia_lib, [important/2, dbg_out/2, verbose/2]).
+-import(mnesia_lib, [important/2, warning/2, dbg_out/2, verbose/2]).
 
 -export([lock/4, write/5, delete/5, delete_object/5, read/5, match_object/5, all_keys/4,
          first/3, last/3, prev/4, next/4, index_match_object/6, index_read/6, table_info/4,
@@ -34,10 +34,11 @@
 
 val(Var) ->
     case ?catch_val_and_stack(Var) of
-	{'EXIT', Stacktrace} -> mnesia_lib:other_val(Var, Stacktrace);
-	Value -> Value
+        {'EXIT', Stacktrace} ->
+            mnesia_lib:other_val(Var, Stacktrace);
+        Value ->
+            Value
     end.
-
 
 start() ->
     mnesia_monitor:start_proc(?MODULE, ?MODULE, init, [self()]).
@@ -74,7 +75,10 @@ doit_loop(#state{coordinators = Coordinators,
                     doit_loop(State2)
             end;
         {'EXIT', Pid, Reason} ->
-            handle_exit(Pid, Reason, State)
+            handle_exit(Pid, Reason, State);
+        Msg ->
+            verbose("** ERROR ** ~p got unexpected message: ~tp~n", [?MODULE, Msg]),
+            doit_loop(State)
     end.
 
 %% mnesia_access API
@@ -198,8 +202,8 @@ select({async_ec, _Pid}, _Ts, Tab, Spec, _LockKind) ->
 select(Tid, Ts, Tab, Spec, LockKind) ->
     mnesia:select(Tid, Ts, Tab, Spec, LockKind).
 
-table_info({asyn_ec, _Pid}, _Ts, Tab, Item) ->
-    mnesia:any_table_info(Tab, Item).
+table_info({async_ec, _Pid} = Tid, Ts, Tab, Item) ->
+    mnesia:table_info(Tid, Ts, Tab, Item).
 
 %% Private functions, copied or modified from mnesia.erl and mnesia_tm.erl
 
@@ -226,7 +230,9 @@ ec(Protocol, Item) ->
     dbg_out("ec: ~p~n", [CR]),
     case Protocol of
         async_ec ->
-            ReadNode = val({Tab, where_to_read}),
+            % TODO why wait for a different node?
+            % ReadNode = val({Tab, where_to_read}),
+            ReadNode = node(),
             {WaitFor, FirstRes} = async_send_ec(Tid, CR, Tab, ReadNode),
             mnesia_tm:rec_dirty(WaitFor, FirstRes);
         _ ->
@@ -354,7 +360,15 @@ add_time({ExtInfo, {Oid, Val, Op}}, Ts) ->
     {ExtInfo, {Oid, erlang:append_element(Val, Ts), Op}}.
 
 receive_msg(Tid, Commit, Tab, true) ->
-    true = do_receive_msg(Tid, Commit, Tab),
+    case do_receive_msg(Tid, Commit, Tab) of
+        true ->
+            ok;
+        false ->
+            Ts = mnesia_causal:get_ts(),
+            warning("local commit ~p not deliverable~n, current delivered ~p",
+                    [Commit#commit.ts, Ts]),
+            error({not_deliverable, Commit#commit.ts, Ts})
+    end,
     do_ec(Tid, Commit);
 receive_msg(Tid, Commit, Tab, false) ->
     case do_receive_msg(Tid, Commit, Tab) of
@@ -447,9 +461,7 @@ do_update_ext(Tid, Ext, Ts, OldRes) ->
         false ->
             OldRes;
         {_, Ops} ->
-            Do = fun({{ext, _, _} = Storage, Op}, R) ->
-                    do_update(Tid, Storage, [Op], Ts, R)
-                 end,
+            Do = fun({{ext, _, _} = Storage, Op}, R) -> do_update(Tid, Storage, [Op], Ts, R) end,
             lists:foldl(Do, OldRes, Ops)
     end.
 
@@ -591,7 +603,6 @@ ec_next(Tab, Key) ->
 
 ec_index_match_object(Tab, Pat, Attr) ->
     unimplemnted.
-
 
 %% =============== stop operations ===============
 
