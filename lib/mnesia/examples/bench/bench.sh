@@ -4,18 +4,17 @@
 # Created : 21 Jun 2001 by Hakan Mattsson <hakan@cslab.ericsson.se>
 ######################################################################
 
-args="-pa .. -boot start_sasl -sasl errlog_type error -sname bench"
+args="-pa .. -boot start_sasl -sasl errlog_type error -sname bench +sbt db"
+ERL_TOP=/home/vincent/proj/otp/bin/erl
 set -x
 
 if [ $# -eq 0 ] ; then
     
-    erl $args
+    $ERL_TOP $args
 
 else
-
   while [ $# -gt 0 ]; do
-
-    erl $args -s bench run $1 -s erlang halt
+    $ERL_TOP $args -s bench run $1 -s erlang halt
     shift
   done
 

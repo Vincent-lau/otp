@@ -1,6 +1,7 @@
+ERL_TOP = /home/vincent/proj/otp
 
 all:
-	erl -make
+	$(ERL_TOP)/bin/erl -make
 
 clean:
 	rm *.beam

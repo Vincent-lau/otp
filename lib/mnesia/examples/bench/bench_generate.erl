@@ -34,6 +34,7 @@
 %% Internal
 -export([monitor_init/2, generator_init/2, worker_init/1]).
 
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% The traffic generator
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -196,6 +197,8 @@ generator_loop(Monitor, C, SessionTab, Counters) ->
     end.
 
 %% Perform a transaction on a node near the data
+call_worker([Node | _], async_ec, Fun, Wlock, _Mod) when Node == node() ->
+    {Node, catch mnesia:activity(async_ec, Fun, [Wlock], mnesia_ec)};
 call_worker([Node | _], Activity, Fun, Wlock, Mod) when Node == node() ->
     {Node, catch mnesia:activity(Activity, Fun, [Wlock], Mod)};
 call_worker([Node | _] = Nodes, Activity, Fun, Wlock, Mod) ->
@@ -588,7 +591,7 @@ display_statistics(Stats, C) ->
     ?d("~n", []),
     Kind =
         case C#config.generator_profile of
-            async ->
+            async_ec ->
                 async;
             _Other ->
                 transaction

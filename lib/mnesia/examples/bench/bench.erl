@@ -1,8 +1,8 @@
 %%
 %% %CopyrightBegin%
-%% 
+%%
 %% Copyright Ericsson AB 2001-2016. All Rights Reserved.
-%% 
+%%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
 %% You may obtain a copy of the License at
@@ -14,7 +14,7 @@
 %% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
-%% 
+%%
 %% %CopyrightEnd%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% File    : bench.hrl
@@ -24,41 +24,35 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 -module(bench).
+
 -author('hakan@cslab.ericsson.se').
 
 -include("bench.hrl").
 
--export([
-         run/0, run/1,
-	 
-         start_all/0, start_all/1,
-	 populate/0, populate/1,
-	 generate/0, generate/1,
-	 
-	 args_to_config/1, verify_config/2,
-	 start/0, start/1,
-	 stop_slave_nodes/1,
-	 bind_schedulers/0
-        ]).
+-export([run/0, run/1, start_all/0, start_all/1, populate/0, populate/1, generate/0,
+         generate/1, args_to_config/1, verify_config/2, start/0, start/1, stop_slave_nodes/1,
+         bind_schedulers/0, set_debug_level_all/2]).
 
 bind_schedulers() ->
     try
         %% Avoid first core and bind schedulers to the remaining ones
-	[{processor, CoreTopo}] = erlang:system_info(cpu_topology),
-    NewTopo = [{processor, lists:reverse(CoreTopo)}],
-	erlang:system_flag(cpu_topology,NewTopo),
-	N = erlang:system_info(schedulers),
-	erlang:system_flag(schedulers_online, lists:max([N - 1, 1])),
-	erlang:system_flag(scheduler_bind_type, default_bind),
-	timer:sleep(timer:seconds(1)), % Wait for Rickard
-	erlang:system_info(scheduler_bindings)
-    catch _:_ ->
-        %% Ancient systems
-        ignore
+        [{processor, CoreTopo}] = erlang:system_info(cpu_topology),
+        NewTopo = [{processor, lists:reverse(CoreTopo)}],
+        erlang:system_flag(cpu_topology, NewTopo),
+        N = erlang:system_info(schedulers),
+        erlang:system_flag(schedulers_online, lists:max([N - 1, 1])),
+        erlang:system_flag(scheduler_bind_type, default_bind),
+        timer:sleep(
+            timer:seconds(1)), % Wait for Rickard
+        erlang:system_info(scheduler_bindings)
+    catch
+        _:_ ->
+            %% Ancient systems
+            ignore
     end.
 
 %% Run the benchmark:
-%% 
+%%
 %%   - Start all necessary Erlang nodes
 %%   - Populate the database
 %%   - Start the traffic generators
@@ -84,31 +78,32 @@ start() ->
 start(Args) ->
     C = args_to_config(Args),
     erlang:set_cookie(node(), C#config.cookie),
-    Nodes = [node() | (((C#config.table_nodes -- C#config.generator_nodes) ++
-			C#config.generator_nodes) -- [node()])],
+    Nodes =
+        [node() | ((C#config.table_nodes -- C#config.generator_nodes) ++ C#config.generator_nodes)
+                  -- [node()]],
     Extra = [{extra_db_nodes, Nodes}],
     ?d("Starting Mnesia on node ~p...", [node()]),
     case mnesia:start(Extra) of
-	ok ->
-	    Tables = mnesia:system_info(tables),
-	    io:format(" ok.~n" , []),
-	    ?d("Waiting for ~p tables...", [length(Tables)]),
-	    wait(Tables);
-	{error, Reason} ->
-	    io:format(" FAILED: ~p~n", [Reason]),
-	    {error, Reason}
+        ok ->
+            Tables = mnesia:system_info(tables),
+            io:format(" ok.~n", []),
+            ?d("Waiting for ~p tables...", [length(Tables)]),
+            wait(Tables);
+        {error, Reason} ->
+            io:format(" FAILED: ~p~n", [Reason]),
+            {error, Reason}
     end.
 
 wait(Tables) ->
     case mnesia:wait_for_tables(Tables, timer:seconds(10)) of
-	ok ->
-	    io:format(" loaded.~n", []),
-	    ok;
-	{timeout, More} ->
-	    io:format(" ~p...", [length(More)]),
-	    wait(More)
+        ok ->
+            io:format(" loaded.~n", []),
+            ok;
+        {timeout, More} ->
+            io:format(" ~p...", [length(More)]),
+            wait(More)
     end.
-    
+
 %% Populate the database
 populate() ->
     FileName = 'bench.config',
@@ -133,70 +128,75 @@ start_all() ->
 
 start_all(Args) ->
     C = args_to_config(Args),
-    Nodes = [node() | (((C#config.table_nodes -- C#config.generator_nodes) ++
-			C#config.generator_nodes) -- [node()])],
+    Nodes =
+        [node() | ((C#config.table_nodes -- C#config.generator_nodes) ++ C#config.generator_nodes)
+                  -- [node()]],
     erlang:set_cookie(node(), C#config.cookie),
     ?d("Starting Erlang nodes...~n", []),
     ?d("~n", []),
-   SlaveNodes = do_start_all(Nodes, [], C#config.cookie),
+    SlaveNodes = do_start_all(Nodes, [], C#config.cookie),
     Extra = [{extra_db_nodes, Nodes}],
     ?d("~n", []),
     ?d("Starting Mnesia...", []),
     case rpc:multicall(Nodes, mnesia, start, [Extra]) of
-	{Replies, []} ->
-	    case [R || R <- Replies, R /= ok] of
-		[] ->
-		    io:format(" ok~n", []),
-		    SlaveNodes;
-		Bad ->
-		    io:format(" FAILED: ~p~n", [Bad]),
-		    exit({mnesia_start, Bad})
-	    end;
-	Bad ->
-	    io:format(" FAILED: ~p~n", [Bad]),
-	    exit({mnesia_start, Bad})
-    end.
+        {Replies, []} ->
+            case [R || R <- Replies, R /= ok] of
+                [] ->
+                    io:format(" ok~n", []),
+                    SlaveNodes;
+                Bad ->
+                    io:format(" FAILED: ~p~n", [Bad]),
+                    exit({mnesia_start, Bad})
+            end;
+        Bad ->
+            io:format(" FAILED: ~p~n", [Bad]),
+            exit({mnesia_start, Bad})
+    end,
+    set_debug_level_all(C, none).
 
-do_start_all([Node | Nodes], Acc, Cookie) when is_atom(Node) ->    
+
+set_debug_level_all(C, Debug) ->
+    Nodes =
+        [node() | ((C#config.table_nodes -- C#config.generator_nodes) ++ C#config.generator_nodes)
+                  -- [node()]],
+    rpc:multicall(Nodes, mnesia, set_debug_level, [Debug]).
+
+
+do_start_all([Node | Nodes], Acc, Cookie) when is_atom(Node) ->
     case string:tokens(atom_to_list(Node), [$@]) of
-	[Name, Host] ->
-	    Arg = lists:concat(["-setcookie ", Cookie]),
-	    ?d("    ~s", [left(Node)]),
-	    case slave:start_link(Host, Name, Arg) of
-		{ok, Node} ->
-		    load_modules(Node),
-		    rpc:call(Node, ?MODULE, bind_schedulers, []),
-		    io:format(" started~n", []),
-		    do_start_all(Nodes, [Node | Acc], Cookie);
-		{error, {already_running, Node}} ->
-		    rpc:call(Node, ?MODULE, bind_schedulers, []),
-		    io:format(" already started~n", []),
-		    do_start_all(Nodes, Acc, Cookie);
-		{error, Reason} ->
-		    io:format(" FAILED:~p~n", [Reason]),
-		    stop_slave_nodes(Acc),
-		    exit({slave_start_failed, Reason})
-	    end;
-	_ ->
-	    ?d("    ~s FAILED: "
-	       "Not valid as node name. Must be 'name@host'.~n",
-	       [left(Node)]),
-	    stop_slave_nodes(Acc),
-	    exit({bad_node_name, Node})
+        [Name, Host] ->
+            Arg = lists:concat(["-setcookie ", Cookie]),
+            ?d("    ~s", [left(Node)]),
+            case slave:start_link(Host, Name, Arg) of
+                {ok, Node} ->
+                    load_modules(Node),
+                    rpc:call(Node, ?MODULE, bind_schedulers, []),
+                    io:format(" started~n", []),
+                    do_start_all(Nodes, [Node | Acc], Cookie);
+                {error, {already_running, Node}} ->
+                    rpc:call(Node, ?MODULE, bind_schedulers, []),
+                    io:format(" already started~n", []),
+                    do_start_all(Nodes, Acc, Cookie);
+                {error, Reason} ->
+                    io:format(" FAILED:~p~n", [Reason]),
+                    stop_slave_nodes(Acc),
+                    exit({slave_start_failed, Reason})
+            end;
+        _ ->
+            ?d("    ~s FAILED: Not valid as node name. Must be 'name@host'.~n", [left(Node)]),
+            stop_slave_nodes(Acc),
+            exit({bad_node_name, Node})
     end;
 do_start_all([], StartedNodes, _Cookie) ->
     StartedNodes.
 
 load_modules(Node) ->
-    Fun = 
-	fun(Mod) ->
-		case code:get_object_code(Mod) of
-		    {_Module, Bin, Fname} ->
-			rpc:call(Node, code,load_binary,[Mod,Fname,Bin]);
-		    Other ->
-			Other
-		end
-	end,
+    Fun = fun(Mod) ->
+             case code:get_object_code(Mod) of
+                 {_Module, Bin, Fname} -> rpc:call(Node, code, load_binary, [Mod, Fname, Bin]);
+                 Other -> Other
+             end
+          end,
     lists:foreach(Fun, [bench, bench_generate, bench_populate, bench_trans]).
 
 stop_slave_nodes([]) ->
@@ -214,7 +214,7 @@ do_stop_slave_nodes([Node | Nodes]) ->
     do_stop_slave_nodes(Nodes);
 do_stop_slave_nodes([]) ->
     ok.
-	    
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% The configuration
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -225,7 +225,7 @@ args_to_config(Args) when is_list(Args) ->
     do_args_to_config(Args, []).
 
 do_args_to_config([{Key, Val} | Rest], Acc) when is_list(Acc) ->
-    do_args_to_config(Rest,  Acc ++ [{Key, Val}]);
+    do_args_to_config(Rest, Acc ++ [{Key, Val}]);
 do_args_to_config([FileName | Rest], Acc) when is_list(Acc) ->
     io:nl(),
     ?d("Reading configuration file ~p...", [FileName]),
@@ -235,7 +235,8 @@ do_args_to_config([FileName | Rest], Acc) when is_list(Acc) ->
             do_args_to_config(Rest, Acc ++ Config);
         {error, Reason} ->
             io:format(" FAILED: ~s~n",
-               [[lists:flatten(file:format_error( Reason))]]),
+                      [[lists:flatten(
+                            file:format_error(Reason))]]),
             {error, {args_to_config, FileName, Reason}}
     end;
 do_args_to_config([], Acc) when is_list(Acc) ->
@@ -245,7 +246,9 @@ verify_config([{Tag, Val} | T], C) ->
     case Tag of
         cookie when is_atom(Val) ->
             verify_config(T, C#config{cookie = Val});
-        generator_profile when Val == async ->
+        generator_profile when Val == async_ec ->
+            verify_config(T, C#config{generator_profile = Val});
+        generator_profile when Val == async_dirty ->
             verify_config(T, C#config{generator_profile = Val});
         generator_profile when Val == random ->
             verify_config(T, C#config{generator_profile = Val});
@@ -302,8 +305,8 @@ verify_config([{Tag, Val} | T], C) ->
         always_try_nearest_node when Val == true; Val == false ->
             verify_config(T, C#config{always_try_nearest_node = Val});
         _ ->
-	    ?e("Bad config value:  ~p~n", [Tag, Val]),
-	    exit({bad_config_value, {Tag, Val}})
+            ?e("Bad config value:  ~p~n", [Tag, Val]),
+            exit({bad_config_value, {Tag, Val}})
     end;
 verify_config([], C) ->
     display_config(C),
@@ -328,4 +331,8 @@ display_config([], []) ->
     ok.
 
 left(Term) ->
-    string:left(lists:flatten(io_lib:format("~p", [Term])), 27, $.).
+    string:left(
+        lists:flatten(
+            io_lib:format("~p", [Term])),
+        27,
+        $.).
