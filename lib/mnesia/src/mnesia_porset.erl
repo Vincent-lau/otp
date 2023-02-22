@@ -81,7 +81,8 @@ effect(Storage, Tab, Tup) ->
     case causal_compact(Storage, Tab, obj2ele(Tup)) of
         true ->
             dbg_out("not redundant, inserting ~p into ~p~n", [Tup, Tab]),
-            mnesia_lib:db_put(Storage, Tab, Tup);
+            mnesia_lib:db_put(Storage, Tab, Tup),
+            ok;
         false ->
             dbg_out("redundant", []),
             ok
@@ -214,8 +215,37 @@ repair_continuation(Cont, Ms) ->
 %% @returns whether this element should be added
 -spec causal_compact(storage(), mnesia:table(), element()) -> boolean().
 causal_compact(Storage, Tab, Ele) ->
+    % Parent = self(),
+    % spawn(fun() ->
+    %         remove_obsolete(Storage, Tab, Ele),
+    %         dbg_out("sending message to ~p~n", [whereis(waiter)]),
+    %         Parent ! {self(), obsolete, ok}
+    %       end),
+    % spawn(fun() ->
+    %         Red = redundant(Storage, Tab, Ele),
+    %         Parent ! {self(), redundancy, Red}
+    %       end),
+    % wait_causal_compact([]).
+
     ok = remove_obsolete(Storage, Tab, Ele),
     not redundant(Storage, Tab, Ele).
+
+% wait_causal_compact(State) when length(State) == 2 ->
+%     case State of
+%         [ok, Red] when is_boolean(Red) ->
+%             not Red;
+%         [Red, ok] when is_boolean(Red) ->
+%             not Red
+%     end;
+% wait_causal_compact(State) ->
+%     receive
+%         {_Pid, obsolete, ok} ->
+%             dbg_out("obsolete removed ~n", []),
+%             wait_causal_compact([ok | State]);
+%         {_Pid, redundancy, Red} ->
+%             dbg_out("redundant ~p~n", [Red]),
+%             wait_causal_compact([Red | State])
+%     end.
 
 %% @doc checks whether the input element is redundant
 %% i.e. if there are any other elements in the table that obsoletes this element
