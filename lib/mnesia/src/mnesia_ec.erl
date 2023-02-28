@@ -376,55 +376,43 @@ add_time({ExtInfo, {Oid, Val, Op}}, Ts) ->
 
 receive_msg(Tid, Commit, Tab, local) ->
     mnesia_causal:deliver_one(Commit),
-    % case do_receive_msg(Tid, Commit, Tab) of
-    %     true ->
-    %         ok;
-    %     false ->
-    %         Ts = mnesia_causal:get_ts(),
-    %         warning("local commit ~p not deliverable~n, current delivered ~p\n  "
-    %                 "                  sender ~p~n",
-    %                 [{Tid, Commit, Tab}, Ts, Commit#commit.sender]),
-    %         error({not_deliverable, Commit#commit.ts, Ts})
-    % end,
     do_ec(Tid, Commit);
 receive_msg(Tid, Commit, Tab, {rcv, async}) ->
-    case do_receive_msg(Tid, Commit, Tab) of
-        true ->
-            do_async_ec(Tid, mnesia_tm:new_cr_format(Commit), Tab);
-        false ->
-            ok
-    end;
+    Deliverable = mnesia_causal:rcv_msg(Tid, Commit, Tab),
+    dbg_out("found async_ec devliverable commits: ~p~n", [Deliverable]),
+    lists:foreach(fun({Tid1, Commit1, Tab1}) ->
+                     do_async_ec(Tid1, mnesia_tm:new_cr_format(Commit1), Tab1)
+                  end,
+                  Deliverable);
 receive_msg(Tid, Commit, Tab, {rcv, {sync, From}}) ->
-    case do_receive_msg(Tid, Commit, Tab) of
-        true ->
-            do_sync_ec(From, Tid, mnesia_tm:new_cr_format(Commit), Tab);
-        false ->
-            ok
-    end.
-
-
+    Deliverable = mnesia_causal:rcv_msg(Tid, Commit, Tab, From),
+    dbg_out("found sync_ec devliverable commits: ~p~n", [Deliverable]),
+    lists:foreach(fun({Tid1, Commit1 = #commit{sender = Sender}, Tab1, From1}) ->
+                     do_sync_ec(From1, Tid1, mnesia_tm:new_cr_format(Commit1), Tab1)
+                  end,
+                  Deliverable).
 
 %% @doc This function finds all the deliverable commits in the buffer and delivers them
 %% @returns whether the input message should be delivered, and if should be delivered
 %% when it is in the list of deliverables or we are not using causal broadcast.
 %% @end
--spec do_receive_msg(term(), #commit{}, mnesia:table()) -> boolean().
-do_receive_msg(Tid, Commit, Tab) ->
-    case mnesia_monitor:get_env(causal) of
-        true ->
-            D = mnesia_causal:rcv_msg(Tid, Commit, Tab),
-            dbg_out("found devliverable commits: ~p~n", [D]),
-            {Deliverable, Local} =
-                lists:partition(fun(DInfo) -> DInfo =/= {Tid, Commit, Tab} end, D),
-            lists:foreach(fun({Tid1, Commit1, Tab1}) ->
-                             do_async_ec(Tid1, mnesia_tm:new_cr_format(Commit1), Tab1)
-                          end,
-                          Deliverable),
-            length(Local) > 0;
-        false ->
-            % if we are not using causal broadcast, we deliver all the messages
-            true
-    end.
+% -spec do_receive_msg(term(), #commit{}, mnesia:table()) -> boolean().
+% do_receive_msg(Tid, Commit, Tab) ->
+%     case mnesia_monitor:get_env(causal) of
+%         true ->
+%             D = mnesia_causal:rcv_msg(Tid, Commit, Tab),
+%             dbg_out("found devliverable commits: ~p~n", [D]),
+%             {Deliverable, Local} =
+%                 lists:partition(fun(DInfo) -> DInfo =/= {Tid, Commit, Tab} end, D),
+%             lists:foreach(fun({Tid1, Commit1, Tab1}) ->
+%                              do_async_ec(Tid1, mnesia_tm:new_cr_format(Commit1), Tab1)
+%                           end,
+%                           Deliverable),
+%             length(Local) > 0;
+%         false ->
+%             % if we are not using causal broadcast, we deliver all the messages
+%             true
+%     end.
 
 sync_send_ec(Tid, [Head | Tail], Tab, WaitFor) ->
     Node = Head#commit.node,
