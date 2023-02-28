@@ -190,7 +190,13 @@ generator_loop(Monitor, C, SessionTab, Counters) ->
     after 0 ->
         {Name, {Nodes, Activity, Wlock}, Fun, CommitSessions} = gen_traffic(C, SessionTab),
         Before = erlang:monotonic_time(),
-        Res = call_worker(Nodes, Activity, Fun, Wlock, mnesia),
+        Mod = case C#config.generator_profile of
+            async_ec ->
+                mnesia;
+            _ ->
+                mnesia_frag
+        end,
+        Res = call_worker(Nodes, Activity, Fun, Wlock, Mod),
         After = erlang:monotonic_time(),
         Elapsed = elapsed(Before, After),
         post_eval(Monitor, C, Elapsed, Res, Name, CommitSessions, SessionTab, Counters)

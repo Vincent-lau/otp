@@ -26,6 +26,7 @@
 -module(bench_async).
 
 -compile(debug_info).
+
 -author('sl955@cam.ac.uk').
 
 -include("bench.hrl").
@@ -43,13 +44,7 @@
 %% -------------------------------------------------------------------
 
 update_current_location(Wlock, SubscrId, Location, ChangedBy, ChangedTime) ->
-    Res = mnesia:read(subscriber, SubscrId, Wlock),
-    [Subscr] = case Res of
-        [Subscr1] -> [Subscr1];
-        Other -> 
-            ok,
-            error({no_matching_sub, Res, Other})
-    end,
+    Subscr = busy_read(subscriber, SubscrId),
     Subscr2 =
         Subscr#subscriber{location = Location,
                           changed_by = ChangedBy,
@@ -184,4 +179,15 @@ number_to_key(Id, C) when is_integer(Id) ->
             list_to_binary(string:right(integer_to_list(Id), 10, $0));
         false ->
             Id
+    end.
+
+busy_read(Table, SubscrId) ->
+    case mnesia:read(Table, SubscrId, read) of
+        [] ->
+            ?d("busy_read: retrying read of ~p:~p", [Table, SubscrId]),
+            busy_read(Table, SubscrId);
+        [Subscr] ->
+            Subscr;
+        Other when length(Other) > 1 ->
+            hd(Other)
     end.
