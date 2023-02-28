@@ -23,22 +23,8 @@
 -include("mnesia.hrl").
 
 -export([db_put/3, db_erase/3, db_get/2, db_first/1, db_last_key/1, db_next_key/2,
-         db_select/2, db_prev/2]).
+         db_select/2, db_prev/2, db_all_keys/1]).
 -export([mktab/2, unsafe_mktab/2]).
-
--define(DEBUG, 1).
-
--ifdef(DEBUG).
-
--define(DBG(DATA), dbg_out("~p:~p: ~p", [?MODULE, ?LINE, DATA])).
--define(DBG(FORMAT, ARGS), dbg_out("~p:~p: " ++ FORMAT, [?MODULE, ?LINE] ++ ARGS)).
-
--else.
-
--define(DBG(DATA), ok).
--define(DBG(FORMAT, ARGS), ok).
-
--endif.
 
 -type op() :: write | delete.
 -type val() :: any().
@@ -58,10 +44,6 @@ val(Var) ->
             Value
     end.
 
-%% types() ->
-%%     [{fs_copies, ?MODULE},
-%%      {raw_fs_copies, ?MODULE}].
-
 mktab(Tab, [{keypos, 2}, public, named_table, porset | EtsOpts]) ->
     Args1 = [{keypos, 2}, public, named_table, bag | EtsOpts],
     {Tab1, _Tab2} = porset_name(Tab),
@@ -75,7 +57,6 @@ unsafe_mktab(Tab, [{keypos, 2}, public, named_table, porset | EtsOpts]) ->
 porset_name(Tab) ->
     {list_to_atom(atom_to_list(Tab)), list_to_atom(atom_to_list(Tab) ++ "_tlog")}.
 
-
 -spec effect(storage(), mnesia:table(), tuple()) -> ok.
 effect(Storage, Tab, Tup) ->
     case causal_compact(Storage, Tab, obj2ele(Tup)) of
@@ -86,6 +67,22 @@ effect(Storage, Tab, Tup) ->
         false ->
             dbg_out("redundant", []),
             ok
+    end.
+
+db_all_keys(Tab) when is_atom(Tab), Tab /= schema ->
+    Pat0 = val({Tab, wild_pattern}),
+    Pat1 =
+        erlang:append_element(
+            erlang:append_element(Pat0, '_'), write),
+    Pat = setelement(2, Pat1, '$1'),
+    Keys = db_select(Tab, [{Pat, [], ['$1']}]),
+    case val({Tab, setorbag}) of
+        porbag ->
+            mnesia_lib:uniq(Keys);
+        porset ->
+            Keys;
+        Other ->
+            error({incorrect_ec_table_type, Other})
     end.
 
 db_put(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
@@ -118,13 +115,14 @@ maybe_create_index(Tab, Index) ->
 db_get(Tab, Key) ->
     Res = mnesia_lib:db_get(Tab, Key),
     dbg_out("running my own lookup function on ~p, got ~p~n", [Tab, Res]),
-    lists:filtermap(fun(Tup) ->
+    Res2 = lists:filtermap(fun(Tup) ->
                        case tup_is_write(Tup) of
                            false -> false;
                            true -> {true, get_val_tup(Tup)}
                        end
                     end,
-                    Res).
+                    Res),
+    mnesia_lib:uniq(Res2).
 
 db_erase(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
     Ts = element(tuple_size(Obj), Obj),
@@ -215,36 +213,63 @@ repair_continuation(Cont, Ms) ->
 %% @returns whether this element should be added
 -spec causal_compact(storage(), mnesia:table(), element()) -> boolean().
 causal_compact(Storage, Tab, Ele) ->
-    % Parent = self(),
-    % spawn(fun() ->
-    %         remove_obsolete(Storage, Tab, Ele),
-    %         dbg_out("sending message to ~p~n", [whereis(waiter)]),
-    %         Parent ! {self(), obsolete, ok}
-    %       end),
-    % spawn(fun() ->
-    %         Red = redundant(Storage, Tab, Ele),
-    %         Parent ! {self(), redundancy, Red}
-    %       end),
-    % wait_causal_compact([]).
+    {Pid1, Mref1} =
+        spawn_monitor(fun() ->
+                         remove_obsolete(Storage, Tab, Ele),
+                         dbg_out("sending message to ~p~n", [whereis(waiter)]),
+                         receive {Parent, Mref} -> Parent ! {Mref, {obsolete, ok}} end
+                      end),
+    {Pid2, Mref2} =
+        spawn_monitor(fun() ->
+                         Red = redundant(Storage, Tab, Ele),
+                         receive {Parent, Mref} -> Parent ! {Mref, {redundancy, Red}} end
+                      end),
+    Parent = self(),
+    Pid1 ! {Parent, Mref1},
+    Pid2 ! {Parent, Mref2},
+    Red1 = wait_causal_compact(Mref1),
+    Red2 = wait_causal_compact(Mref2),
+    Red1 andalso Red2.
 
-    ok = remove_obsolete(Storage, Tab, Ele),
-    not redundant(Storage, Tab, Ele).
+    % ok = remove_obsolete(Storage, Tab, Ele),
+    % not redundant(Storage, Tab, Ele).
 
-% wait_causal_compact(State) when length(State) == 2 ->
+wait_causal_compact(Mref) ->
+    receive
+        {Mref, {obsolete, ok}} ->
+            erlang:demonitor(Mref, [flush]),
+            dbg_out("obsolete removed ~n", []),
+            true;
+        {Mref, {redundancy, Red}} ->
+            erlang:demonitor(Mref, [flush]),
+            dbg_out("redundant ~p~n", [Red]),
+            not Red;
+        {'DOWN', Mref, _, _, Reason} ->
+            {error, Reason}
+    end.
+    
+
+% wait_causal_compact(_Mr1, _Mr2, State) when length(State) == 2 ->
 %     case State of
 %         [ok, Red] when is_boolean(Red) ->
 %             not Red;
 %         [Red, ok] when is_boolean(Red) ->
 %             not Red
 %     end;
-% wait_causal_compact(State) ->
+% wait_causal_compact(Mref1, Mref2, State) ->
 %     receive
-%         {_Pid, obsolete, ok} ->
+%         {Mref1, {obsolete, ok}} ->
+%             erlang:demonitor(Mref1, [flush]),
 %             dbg_out("obsolete removed ~n", []),
-%             wait_causal_compact([ok | State]);
-%         {_Pid, redundancy, Red} ->
+%             wait_causal_compact(Mref1, Mref2, [ok | State]);
+%         {Mref2, {redundancy, Red}} ->
+%             erlang:demonitor(Mref2, [flush]),
 %             dbg_out("redundant ~p~n", [Red]),
-%             wait_causal_compact([Red | State])
+%             wait_causal_compact(Mref1, Mref2, [Red | State]);
+%         {'DOWN', Mref1, _, _, Reason} ->
+%             {error, Reason};
+%         {'DOWN', Mref2, _, _, Reason} ->
+%             {error, Reason}
 %     end.
 
 %% @doc checks whether the input element is redundant
@@ -271,12 +296,12 @@ redundant(Storage, Tab, Ele) ->
 remove_obsolete(Storage, Tab, Ele) ->
     dbg_out("checking obsolete~n", []),
     Key = get_val_key(get_val_ele(Ele)),
-    dbg_out("key ~p~n", [Key]),
+    % dbg_out("key ~p~n", [Key]),
     Tups = mnesia_lib:db_get(Storage, Tab, Key),
-    dbg_out("existing tuples ~p~n", [Tups]),
+    % dbg_out("existing tuples ~p~n", [Tups]),
     mnesia_lib:db_erase(Storage, Tab, Key),
     Keep = lists:filter(fun(Tup) -> not obsolete(Tab, obj2ele(Tup), Ele) end, Tups),
-    dbg_out("removed obsolete ~p kept ~p~n", [Tups -- Keep, Keep]),
+    % dbg_out("removed obsolete ~p kept ~p~n", [Tups -- Keep, Keep]),
     mnesia_lib:db_put(Storage, Tab, Keep),
     ok.
 

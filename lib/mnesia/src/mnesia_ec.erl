@@ -67,10 +67,21 @@ doit_loop(#state{coordinators = Coordinators,
             dbg_out("received async_ec: ~p~n", [{From, {async_ec, Tid, Commit, Tab}}]),
             case lists:member(Tab, State#state.blocked_tabs) of
                 false ->
-                    mnesia_ec:receive_msg(Tid, Commit, Tab, false),
+                    mnesia_ec:receive_msg(Tid, Commit, Tab, {rcv, async}),
                     doit_loop(State);
                 true ->
                     Item = {async_ec, Tid, mnesia_tm:new_cr_format(Commit), Tab},
+                    State2 = State#state{dirty_queue = [Item | State#state.dirty_queue]},
+                    doit_loop(State2)
+            end;
+        {From, {sync_ec, Tid, Commit, Tab}} ->
+            case lists:member(Tab, State#state.blocked_tabs) of
+                false ->
+                    dbg_out("received sync_ec: ~p~n", [{From, {sync_ec, Tid, Commit, Tab}}]),
+                    mnesia_ec:receive_msg(Tid, Commit, Tab, {rcv, {sync, From}}),
+                    doit_loop(State);
+                true ->
+                    Item = {sync_ec, From, Tid, mnesia_tm:new_cr_format(Commit), Tab},
                     State2 = State#state{dirty_queue = [Item | State#state.dirty_queue]},
                     doit_loop(State2)
             end;
@@ -83,19 +94,23 @@ doit_loop(#state{coordinators = Coordinators,
 
 %% mnesia_access API
 %%
-lock({async_ec, _Pid}, _Ts, _LockItem, _LockKind) ->
+lock({SyncMode, _Pid}, _Ts, _LockItem, _LockKind)
+    when SyncMode =:= sync_ec orelse SyncMode =:= async_ec ->
     [];
 lock(Tid, Ts, LockItem, LockKind) ->
     mnesia:lock(Tid, Ts, LockItem, LockKind).
 
-write({async_ec, _Pid}, _Ts, Tab, Val, _LockKind)
-    when is_atom(Tab), Tab /= schema, is_tuple(Val), tuple_size(Val) > 2 ->
-    do_ec_write(async_ec, Tab, Val);
+write({SyncMode, _Pid}, _Ts, Tab, Val, _LockKind)
+    when is_atom(Tab), Tab /= schema, is_tuple(Val), tuple_size(Val) > 2,
+         SyncMode =:= sync_ec;
+         SyncMode =:= async_ec ->
+    do_ec_write(SyncMode, Tab, Val);
 write(Tid, Ts, Tab, Val, LockKind) ->
     mnesia:write(Tid, Ts, Tab, Val, LockKind).
 
-delete({async_ec, _Pid}, Ts, Tab, Key, _LockKind) when is_atom(Tab), Tab /= schema ->
-    do_ec_delete(async_ec, Tab, Key);
+delete({SyncMode, _Pid}, Ts, Tab, Key, _LockKind)
+    when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
+    do_ec_delete(SyncMode, Tab, Key);
 delete(Tid, Ts, Tab, Val, LockKind) ->
     mnesia:delete(Tid, Ts, Tab, Val, LockKind).
 
@@ -112,7 +127,8 @@ delete_object(Tid, Ts, Tab, Val, LockKind) ->
         %      delete_object(_Tid, _Ts, Tab, _Key, _LockKind) ->
         %          abort({bad_type, Tab}).
 
-read({async_ec, _Pid}, _Ts, Tab, Key, _LockKind) when is_atom(Tab), Tab /= schema ->
+read({SyncMode, _Pid}, _Ts, Tab, Key, _LockKind)
+    when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
     ec_read(Tab, Key);
 read(_Tid, _Ts, Tab, _Key, _LockKind) ->
     mnesia:abort({bad_type, Tab}).
@@ -128,38 +144,32 @@ match_object(Tid, Ts, Tab, Pat, LockKind) ->
        %           match_object(_Tid, _Ts, Tab, Pat, _LockKind) ->
        %               abort({bad_type, Tab, Pat}).
 
-all_keys({async_ec, _Pid} = Tid, Ts, Tab, LockKind) when is_atom(Tab), Tab /= schema ->
-    Pat0 = val({Tab, wild_pattern}),
-    Pat1 =
-        erlang:append_element(
-            erlang:append_element(Pat0, '_'), write),
-    Pat = setelement(2, Pat1, '$1'),
-    Keys = select(Tid, Ts, Tab, [{Pat, [], ['$1']}], LockKind),
-    case val({Tab, setorbag}) of
-        bag ->
-            mnesia_lib:uniq(Keys);
-        _ ->
-            Keys
-    end;
+all_keys({SyncMode, _Pid} = Tid, _Ts, Tab, _LockKind)
+    when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
+    mnesia_porset:db_all_keys(Tab);
 all_keys(_Tid, _Ts, Tab, _LockKind) ->
     mnesia:abort({bad_type, Tab}).
 
-first({async_ec, _Pid}, _Ts, Tab) when is_atom(Tab), Tab /= schema ->
+first({SyncMode, _Pid}, _Ts, Tab)
+    when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
     ec_first(Tab);
 first(_Tid, _Ts, Tab) ->
     mnesia:abort({bad_type, Tab}).
 
-last({async_ec, _Pid}, _Ts, Tab) when is_atom(Tab), Tab /= schema ->
+last({SyncMode, _Pid}, _Ts, Tab)
+    when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
     ec_last(Tab);
 last(_Tid, _Ts, Tab) ->
     mnesia:abort({bad_type, Tab}).
 
-prev({async_ec, _Pid}, _Ts, Tab, Key) when is_atom(Tab), Tab /= schema ->
+prev({SyncMode, _Pid}, _Ts, Tab, Key)
+    when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
     ec_prev(Tab, Key);
 prev(_Tid, _Ts, Tab, _) ->
     mnesia:abort({bad_type, Tab}).
 
-next({async_ec, _pid}, _Ts, Tab, Key) when is_atom(Tab), Tab /= schema ->
+next({SyncMode, _pid}, _Ts, Tab, Key)
+    when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
     ec_next(Tab, Key);
 next(_Tid, _Ts, Tab, _) ->
     mnesia:abort({bad_type, Tab}).
@@ -197,12 +207,14 @@ index_read(Tid, Ts, Tab, Key, Attr, LockKind) ->
        %                         index_read(_Tid, _Ts, Tab, _Key, _Attr, _LockKind) ->
        %                             abort({bad_type, Tab}).
 
-select({async_ec, _Pid}, _Ts, Tab, Spec, _LockKind) ->
+select({SyncMode, _Pid}, _Ts, Tab, Spec, _LockKind)
+    when SyncMode =:= sync_ec; SyncMode =:= async_ec ->
     ec_select(Tab, Spec);
 select(Tid, Ts, Tab, Spec, LockKind) ->
     mnesia:select(Tid, Ts, Tab, Spec, LockKind).
 
-table_info({async_ec, _Pid} = Tid, Ts, Tab, Item) ->
+table_info({SyncMode, _Pid} = Tid, Ts, Tab, Item)
+    when SyncMode =:= sync_ec; SyncMode =:= async_ec ->
     mnesia:table_info(Tid, Ts, Tab, Item).
 
 %% Private functions, copied or modified from mnesia.erl and mnesia_tm.erl
@@ -230,11 +242,14 @@ ec(Protocol, Item) ->
     dbg_out("ec: ~p~n", [CR]),
     case Protocol of
         async_ec ->
-            % TODO why wait for a different node?
-            % ReadNode = val({Tab, where_to_read}),
-            ReadNode = node(),
+            ReadNode = val({Tab, where_to_read}),
             {WaitFor, FirstRes} = async_send_ec(Tid, CR, Tab, ReadNode),
-            mnesia_tm:rec_dirty(WaitFor, FirstRes);
+            rec_ec(WaitFor, FirstRes);
+        sync_ec ->
+            %% Send commit records to the other involved nodes,
+            %% and wait for all nodes to complete
+            {WaitFor, FirstRes} = sync_send_ec(Tid, CR, Tab, []),
+            rec_ec(WaitFor, FirstRes);
         _ ->
             mnesia:abort({bad_activity, Protocol})
     end.
@@ -359,30 +374,41 @@ add_time({Oid, Val, Op}, Ts) ->
 add_time({ExtInfo, {Oid, Val, Op}}, Ts) ->
     {ExtInfo, {Oid, erlang:append_element(Val, Ts), Op}}.
 
-receive_msg(Tid, Commit, Tab, true) ->
-    case do_receive_msg(Tid, Commit, Tab) of
-        true ->
-            ok;
-        false ->
-            Ts = mnesia_causal:get_ts(),
-            warning("local commit ~p not deliverable~n, current delivered ~p",
-                    [Commit#commit.ts, Ts]),
-            error({not_deliverable, Commit#commit.ts, Ts})
-    end,
+receive_msg(Tid, Commit, Tab, local) ->
+    mnesia_causal:deliver_one(Commit),
+    % case do_receive_msg(Tid, Commit, Tab) of
+    %     true ->
+    %         ok;
+    %     false ->
+    %         Ts = mnesia_causal:get_ts(),
+    %         warning("local commit ~p not deliverable~n, current delivered ~p\n  "
+    %                 "                  sender ~p~n",
+    %                 [{Tid, Commit, Tab}, Ts, Commit#commit.sender]),
+    %         error({not_deliverable, Commit#commit.ts, Ts})
+    % end,
     do_ec(Tid, Commit);
-receive_msg(Tid, Commit, Tab, false) ->
+receive_msg(Tid, Commit, Tab, {rcv, async}) ->
     case do_receive_msg(Tid, Commit, Tab) of
         true ->
             do_async_ec(Tid, mnesia_tm:new_cr_format(Commit), Tab);
         false ->
             ok
+    end;
+receive_msg(Tid, Commit, Tab, {rcv, {sync, From}}) ->
+    case do_receive_msg(Tid, Commit, Tab) of
+        true ->
+            do_sync_ec(From, Tid, mnesia_tm:new_cr_format(Commit), Tab);
+        false ->
+            ok
     end.
+
+
 
 %% @doc This function finds all the deliverable commits in the buffer and delivers them
 %% @returns whether the input message should be delivered, and if should be delivered
 %% when it is in the list of deliverables or we are not using causal broadcast.
 %% @end
--spec do_receive_msg(term(), #commit{}, atom()) -> boolean().
+-spec do_receive_msg(term(), #commit{}, mnesia:table()) -> boolean().
 do_receive_msg(Tid, Commit, Tab) ->
     case mnesia_monitor:get_env(causal) of
         true ->
@@ -400,6 +426,21 @@ do_receive_msg(Tid, Commit, Tab) ->
             true
     end.
 
+sync_send_ec(Tid, [Head | Tail], Tab, WaitFor) ->
+    Node = Head#commit.node,
+    if Node == node() ->
+           % if the node we want to deliver to is local, we deliver it directly
+           {WF, _} = sync_send_ec(Tid, Tail, Tab, WaitFor),
+           Res = receive_msg(Tid, Head, Tab, local),
+           {WF, Res};
+       true ->
+           % otherwise we need to send it and wait for ack
+           {?MODULE, Node} ! {self(), {sync_ec, Tid, Head, Tab}},
+           sync_send_ec(Tid, Tail, Tab, [Node | WaitFor])
+    end;
+sync_send_ec(_Tid, [], _Tab, WaitFor) ->
+    {WaitFor, {'EXIT', {aborted, {node_not_running, WaitFor}}}}.
+
 %% @returns {WaitFor, Res}
 async_send_ec(_Tid, _Nodes, Tab, nowhere) ->
     {[], {'EXIT', {aborted, {no_exists, Tab}}}};
@@ -410,10 +451,13 @@ async_send_ec(Tid, [Head | Tail], Tab, ReadNode, WaitFor, Res) ->
     dbg_out("async_send_ec Nodes: ~p~n", [[Head | Tail]]),
     Node = Head#commit.node,
     if ReadNode == Node, Node == node() ->
-           NewRes = receive_msg(Tid, Head, Tab, true),
+           NewRes = receive_msg(Tid, Head, Tab, local),
            async_send_ec(Tid, Tail, Tab, ReadNode, WaitFor, NewRes);
        ReadNode == Node ->
-           {?MODULE, Node} ! {self(), {async_ec, Tid, Head, Tab}},
+           % if the readnode is not local, we need to send it to the readnode and
+           % _wait_ for it, note the sync_ec
+           % this might happen when we are not a mnemis node
+           {?MODULE, Node} ! {self(), {sync_ec, Tid, Head, Tab}},
            NewRes = {'EXIT', {aborted, {node_not_running, Node}}},
            async_send_ec(Tid, Tail, Tab, ReadNode, [Node | WaitFor], NewRes);
        true ->
@@ -424,12 +468,58 @@ async_send_ec(Tid, [Head | Tail], Tab, ReadNode, WaitFor, Res) ->
 async_send_ec(_Tid, [], _Tab, _ReadNode, WaitFor, Res) ->
     {WaitFor, Res}.
 
+rec_ec([Node | Tail], Res) when Node /= node() ->
+    NewRes = get_ec_reply(Node, Res),
+    rec_ec(Tail, NewRes);
+rec_ec([], Res) ->
+    Res.
+
+get_ec_reply(Node, Res) ->
+    receive
+        {?MODULE, Node, {'EXIT', Reason}} ->
+            {'EXIT', {aborted, {badarg, Reason}}};
+        {?MODULE, Node, {ec_res, ok}} ->
+            case Res of
+                {'EXIT', {aborted, {node_not_running, _Node}}} ->
+                    ok;
+                _ ->
+                    %% Prioritize bad results, but node_not_running
+                    Res
+            end;
+        {?MODULE, Node, {ec_res, Reply}} ->
+            Reply;
+        {mnesia_down, Node} ->
+            case get(mnesia_activity_state) of
+                {_, Tid, _Ts} when element(1, Tid) == tid ->
+                    %% Hmm dirty called inside a transaction, to avoid
+                    %% hanging transaction we need to restart the transaction
+                    mnesia:abort({node_not_running, Node});
+                _ ->
+                    %% It's ok to ignore mnesia_down's since we will make
+                    %% the replicas consistent again when Node is started
+                    Res
+            end
+    after 1000 ->
+        case lists:member(Node, val({current, db_nodes})) of
+            true ->
+                get_ec_reply(Node, Res);
+            false ->
+                Res
+        end
+    end.
+
 %%% =============== Receiving and update ===================
 
 do_async_ec(Tid, Commit, _Tab) ->
     ?eval_debug_fun({?MODULE, async_ec, pre}, [{tid, Tid}]),
     do_ec(Tid, Commit),
     ?eval_debug_fun({?MODULE, async_ec, post}, [{tid, Tid}]).
+
+do_sync_ec(From, Tid, Commit, _Tab) ->
+    ?eval_debug_fun({?MODULE, sync_ec, pre}, [{tid, Tid}]),
+    Res = do_ec(Tid, Commit),
+    ?eval_debug_fun({?MODULE, sync_ec, post}, [{tid, Tid}]),
+    From ! {?MODULE, node(), {ec_res, Res}}.
 
 do_ec(Tid, Commit) when Commit#commit.schema_ops == [] ->
     mnesia_log:log(Commit),

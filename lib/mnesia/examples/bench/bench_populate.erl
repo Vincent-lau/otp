@@ -50,7 +50,7 @@ start(C) when is_record(C, config) ->
     case C#config.generator_profile of
         async_ec ->
             ?d("    Populate database in async mode...~n", []),
-            mnesia:activity(async_ec, Populate, [], mnesia_ec);
+            mnesia:activity(sync_ec, Populate, [], mnesia_ec);
         _Other ->
             ?d("    Populate database in sync mode...~n", []),
             mnesia:activity(sync_dirty, Populate, [], mnesia_frag)
