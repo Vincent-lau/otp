@@ -114,15 +114,23 @@ maybe_create_index(Tab, Index) ->
 
 db_get(Tab, Key) ->
     Res = mnesia_lib:db_get(Tab, Key),
-    dbg_out("running my own lookup function on ~p, got ~p~n", [Tab, Res]),
-    Res2 = lists:filtermap(fun(Tup) ->
-                       case tup_is_write(Tup) of
-                           false -> false;
-                           true -> {true, get_val_tup(Tup)}
-                       end
-                    end,
-                    Res),
-    mnesia_lib:uniq(Res2).
+    Res2 =
+        lists:filtermap(fun(Tup) ->
+                           case tup_is_write(Tup) of
+                               false -> false;
+                               true -> {true, get_val_tup(Tup)}
+                           end
+                        end,
+                        Res),
+    dbg_out("running my own lookup function on ~p, got ~p~n", [Tab, Res2]),
+    case val({Tab, setorbag}) of
+        porset ->
+            mnesia_lib:uniq(Res2);
+        porbag ->
+            Res2;
+        Other ->
+            error({bad_val, Other})
+    end.
 
 db_erase(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
     Ts = element(tuple_size(Obj), Obj),
@@ -247,30 +255,6 @@ wait_causal_compact(Mref) ->
         {'DOWN', Mref, _, _, Reason} ->
             {error, Reason}
     end.
-    
-
-% wait_causal_compact(_Mr1, _Mr2, State) when length(State) == 2 ->
-%     case State of
-%         [ok, Red] when is_boolean(Red) ->
-%             not Red;
-%         [Red, ok] when is_boolean(Red) ->
-%             not Red
-%     end;
-% wait_causal_compact(Mref1, Mref2, State) ->
-%     receive
-%         {Mref1, {obsolete, ok}} ->
-%             erlang:demonitor(Mref1, [flush]),
-%             dbg_out("obsolete removed ~n", []),
-%             wait_causal_compact(Mref1, Mref2, [ok | State]);
-%         {Mref2, {redundancy, Red}} ->
-%             erlang:demonitor(Mref2, [flush]),
-%             dbg_out("redundant ~p~n", [Red]),
-%             wait_causal_compact(Mref1, Mref2, [Red | State]);
-%         {'DOWN', Mref1, _, _, Reason} ->
-%             {error, Reason};
-%         {'DOWN', Mref2, _, _, Reason} ->
-%             {error, Reason}
-%     end.
 
 %% @doc checks whether the input element is redundant
 %% i.e. if there are any other elements in the table that obsoletes this element
@@ -299,9 +283,9 @@ remove_obsolete(Storage, Tab, Ele) ->
     % dbg_out("key ~p~n", [Key]),
     Tups = mnesia_lib:db_get(Storage, Tab, Key),
     % dbg_out("existing tuples ~p~n", [Tups]),
-    mnesia_lib:db_erase(Storage, Tab, Key),
     Keep = lists:filter(fun(Tup) -> not obsolete(Tab, obj2ele(Tup), Ele) end, Tups),
     % dbg_out("removed obsolete ~p kept ~p~n", [Tups -- Keep, Keep]),
+    mnesia_lib:db_erase(Storage, Tab, Key),
     mnesia_lib:db_put(Storage, Tab, Keep),
     ok.
 
