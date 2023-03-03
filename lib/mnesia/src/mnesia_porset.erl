@@ -125,12 +125,20 @@ db_get(Tab, Key) ->
     dbg_out("running my own lookup function on ~p, got ~p~n", [Tab, Res2]),
     case val({Tab, setorbag}) of
         porset ->
-            mnesia_lib:uniq(Res2);
+            Res3 = mnesia_lib:uniq(Res2),
+            resolve_cc_add(Res3);
         porbag ->
             Res2;
         Other ->
             error({bad_val, Other})
     end.
+
+-spec resolve_cc_add([element()]) -> [element()].
+resolve_cc_add(Res) when length(Res) =< 1 ->
+    Res;
+resolve_cc_add(Res) ->
+    dbg_out("selecting minimum element from ~p to resolve concurrent addition~n", [Res]),
+    [lists:min(Res)].
 
 db_erase(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
     Ts = element(tuple_size(Obj), Obj),
