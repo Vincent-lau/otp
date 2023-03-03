@@ -8,7 +8,7 @@
          all/0, groups/0]).
 -export([sync_ec_rw_ram/1, sync_ec_rw_compare_dirty_ram/1, sync_ec_rwd_ram/1]).
 -export([async_ec_rw_ram/1, async_ec_rwd_ram/1, async_ec_rw_compare_dirty_ram/1]).
--export([ec_rwd_block_ram/1, ec_block_40keys_ram/1]).
+-export([ec_rwd_block_ram/1, ec_block_40keys_ram/1, ec_write_block_ram/1, ec_delete_block_ram/1]).
 
 init_per_testcase(Func, Conf) ->
     mnesia_test_lib:init_per_testcase(Func, Conf).
@@ -23,7 +23,9 @@ all() ->
 groups() ->
     [{ec_cc_crud, [], [async_ec_rw_ram, async_ec_rwd_ram, sync_ec_rw_ram, sync_ec_rwd_ram]},
      {ec_compare_dirty, [], [async_ec_rw_compare_dirty_ram, sync_ec_rw_compare_dirty_ram]},
-     {ec_cc_crud_block, [], [ec_rwd_block_ram, ec_block_40keys_ram]}].
+     {ec_cc_crud_block,
+      [sequence],
+      [ec_rwd_block_ram, ec_block_40keys_ram, ec_write_block_ram, ec_delete_block_ram]}].
 
 init_per_group(_GroupName, Config) ->
     Config.
@@ -175,10 +177,89 @@ ec_rw_compare_dirty(Config, Storage) ->
     EcKeys =
         lists:sort(
             mnesia:activity(Kind, fun() -> mnesia:all_keys(Tab1) end)),
-    io:format("AllKeys on dirty table: ~p~n allkeys on ec table: ~p~n", [DirtyKeys, EcKeys]),
     ?match(DirtyKeys, EcKeys).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+ec_write_block_ram(suite) ->
+    [];
+ec_write_block_ram(Config) when is_list(Config) ->
+    ec_write_block([{is_port, true} | Config], ram_copies).
+
+ec_write_block(Config, Storage) ->
+    [NodeA, NodeA1, NodeA2] = NodeNames = ?acquire_nodes(3, Config),
+    timer:sleep(500),
+    Tab = ec_write_block,
+    Def = [{Storage, NodeNames}, {type, porset}, {attributes, [k, v]}],
+    ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
+
+    Reader = fun(K) -> mnesia:read(Tab, K) end,
+    Writer = fun(K, V) -> mnesia:write({Tab, K, V}) end,
+    BlockAndWrite =
+        fun() ->
+           % block connnection from NodeA1 to NodeA
+           % if called at A1
+           inet_tcp_proxy_dist:block(NodeA),
+           timer:sleep(500),
+           mnesia:async_ec(fun() -> Writer(a, 1) end)
+        end,
+    spawn(NodeA1, BlockAndWrite),
+    timer:sleep(1000),
+    ?match([], mnesia:async_ec(fun() -> Reader(a) end)),
+    ?match(ok, mnesia:async_ec(fun() -> Writer(a, 3) end)),
+    ?match([{Tab, a, 3}], mnesia:async_ec(fun() -> Reader(a) end)),
+
+    % allow connection
+    spawn(NodeA1, fun() -> inet_tcp_proxy_dist:allow(NodeA) end),
+    timer:sleep(1000),
+
+    ?match([{Tab, a, 1}], mnesia:async_ec(fun() -> Reader(a) end)),
+    ?match([{Tab, a, 1}], rpc:call(NodeA1, mnesia, async_ec, [fun() -> Reader(a) end])),
+    ?match([{Tab, a, 1}], rpc:call(NodeA2, mnesia, async_ec, [fun() -> Reader(a) end])).
+
+ec_delete_block_ram(suite) ->
+    [];
+ec_delete_block_ram(Config) when is_list(Config) ->
+    ec_delete_block([{is_port, true} | Config], ram_copies).
+
+ec_delete_block(Config, Storage) ->
+    [NodeA, NodeA1, NodeA2] = NodeNames = ?acquire_nodes(3, Config),
+    timer:sleep(500),
+    Tab = ec_delete_block,
+    Def = [{Storage, NodeNames}, {type, porset}, {attributes, [k, v]}],
+    ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
+
+    Reader = fun(K) -> mnesia:read(Tab, K) end,
+    Writer = fun(K, V) -> mnesia:write({Tab, K, V}) end,
+    Deleter = fun(K) -> mnesia:delete({Tab, K}) end,
+
+    BlockAndDelete =
+        fun() ->
+           % block connnection from NodeA1 to NodeA
+           % if called at A1
+           inet_tcp_proxy_dist:block(NodeA),
+           timer:sleep(500),
+           mnesia:async_ec(fun() -> Deleter(a, 1) end)
+        end,
+    spawn(fun() -> mnesia:async_ec(fun() -> Writer(b, 2) end) end),
+    spawn(NodeA1, fun() -> mnesia:async_ec(fun() -> Writer(a, 1) end) end),
+    timer:sleep(1000),
+    ?match([{Tab, a, 1}], mnesia:async_ec(fun() -> Reader(a) end)),
+
+    spawn(NodeA1, BlockAndDelete),
+    spawn(fun() -> mnesia:async_ec(fun () -> Deleter(a) end) end),
+        
+    timer:sleep(500),
+    ?match([], mnesia:async_ec(fun() -> Reader(a) end)),
+    ?match([{Tab, b, 2}], mnesia:async_ec(fun() -> Reader(b) end)),
+
+    % allow connection
+    spawn(NodeA1, fun() -> inet_tcp_proxy_dist:allow(NodeA) end),
+    timer:sleep(1000),
+
+    ?match([], mnesia:async_ec(fun() -> Reader(a) end)),
+    ?match([], rpc:call(NodeA1, mnesia, async_ec, [fun() -> Reader(a) end])),
+    ?match([], rpc:call(NodeA2, mnesia, async_ec, [fun() -> Reader(a) end])).
 
 ec_rwd_block_ram(suite) ->
     [];
@@ -252,7 +333,7 @@ ec_block_40keys(Config, Storage) ->
 
     spawn(NodeA1, inet_tcp_proxy_dist, allow, [NodeA2]),
 
-    sleep_if_async(async_ec, 2001),
+    sleep_if_async(async_ec, 3000),
     Res = lists:seq(1, 40) -- lists:seq(25, 29),
     ?match(Res,
            lists:sort(
