@@ -184,7 +184,7 @@ number_to_key(Id, C) when is_integer(Id) ->
 busy_read(Table, SubscrId) ->
     case mnesia:read(Table, SubscrId, read) of
         [] ->
-            ?d("busy_read: retrying read of ~p:~p", [Table, SubscrId]),
+            ?d("busy_read: retrying read of ~p:~p~n", [Table, SubscrId]),
             busy_read(Table, SubscrId);
         [Subscr] ->
             Subscr;

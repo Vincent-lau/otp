@@ -65,7 +65,9 @@ run() ->
 run(Args) ->
     C = args_to_config(Args),
     SlaveNodes = start_all(C),
+    set_debug_level_all(C, none),
     bench_populate:start(C),
+    timer:sleep(5000),
     Result = bench_generate:start(C),
     stop_slave_nodes(SlaveNodes),
     Result.
@@ -151,8 +153,7 @@ start_all(Args) ->
         Bad ->
             io:format(" FAILED: ~p~n", [Bad]),
             exit({mnesia_start, Bad})
-    end,
-    set_debug_level_all(C, none).
+    end.
 
 
 set_debug_level_all(C, Debug) ->
