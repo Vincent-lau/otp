@@ -44,12 +44,14 @@ val(Var) ->
             Value
     end.
 
-mktab(Tab, [{keypos, 2}, public, named_table, porset | EtsOpts]) ->
+mktab(Tab, [{keypos, 2}, public, named_table, Type | EtsOpts])
+    when Type =:= porset orelse Type =:= porbag ->
     Args1 = [{keypos, 2}, public, named_table, bag | EtsOpts],
     {Tab1, _Tab2} = porset_name(Tab),
     mnesia_monitor:mktab(Tab1, Args1).
 
-unsafe_mktab(Tab, [{keypos, 2}, public, named_table, porset | EtsOpts]) ->
+unsafe_mktab(Tab, [{keypos, 2}, public, named_table, Type | EtsOpts])
+    when Type =:= porset orelse Type =:= porbag ->
     Args1 = [{keypos, 2}, public, named_table, bag | EtsOpts],
     {Tab1, _Tab2} = porset_name(Tab),
     mnesia_monitor:unsafe_mktab(Tab1, Args1).
@@ -149,6 +151,17 @@ db_erase(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
     effect(Storage, Tab, Tup);
 db_erase(_S, _T, Obj) ->
     error("bad tuple ~p, no ts at the end~n", [Obj]).
+
+db_match_erase(Storage, Tab, Pat) ->
+    dbg_out("running my own match delete function on ~p~n", [Tab]),
+    case val({Tab, setorbag}) of
+        porset ->
+            mnesia_lib:db_match_delete(Storage, Tab, Pat);
+        porbag ->
+            mnesia_lib:db_match_delete(Storage, Tab, Pat);
+        Other ->
+            error({bad_val, Other})
+    end.
 
 match_delete(porset_copies, Tab, Pat) ->
     ets:match_delete(

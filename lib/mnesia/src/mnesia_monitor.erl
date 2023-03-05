@@ -99,11 +99,13 @@ init() ->
 mnesia_down(From, Node) ->
     cast({mnesia_down, From, Node}).
 
-mktab(Tab, Args = [_, _, _, porset | _]) ->
+mktab(Tab, Args = [_, _, _, Type | _]) 
+    when Type =:= porset orelse Type =:= porbag ->
     mnesia_porset:mktab(Tab, Args);
 mktab(Tab, Args) ->
     unsafe_call({mktab, Tab, Args}).
-unsafe_mktab(Tab, [_, _, _, porset | _] = Args) ->
+unsafe_mktab(Tab, [_, _, _, Type | _] = Args) 
+    when Type =:= porset orelse Type =:= porbag ->
     mnesia_porset:unsafe_mktab(Tab, Args);
 unsafe_mktab(Tab, Args) ->
     unsafe_call({unsafe_mktab, Tab, Args}).
@@ -419,9 +421,8 @@ handle_call({unsafe_create_external, Tab, Alias, Mod, Cs}, _From, State) ->
 	Reply ->
 	    {reply, Reply, State}
     end;
-
 handle_call({negotiate_protocol, Mon, _Version, _Protocols}, _From, State)
-  when State#state.tm_started == false ->
+    when State#state.tm_started == false ->
     State2 =  State#state{early_connects = [node(Mon) | State#state.early_connects]},
     {reply, {node(), {reject, self(), uninitialized, uninitialized}}, State2};
 

@@ -114,18 +114,16 @@ delete({SyncMode, _Pid}, Ts, Tab, Key, _LockKind)
 delete(Tid, Ts, Tab, Val, LockKind) ->
     mnesia:delete(Tid, Ts, Tab, Val, LockKind).
 
+delete_object({SyncMode, _Pid}, Ts, Tab, Val, _LockKind)
+    when is_atom(Tab), Tab /= schema, is_tuple(Val), tuple_size(Val) > 2 ->
+    case mnesia:has_var(Val) of
+        false ->
+            do_ec_delete_object(SyncMode, Tab, Val);
+        true ->
+            mnesia:abort({bad_type, Tab, Val})
+    end;
 delete_object(Tid, Ts, Tab, Val, LockKind) ->
-    ok.
-
-        %    when is_atom(Tab), Tab /= schema, is_tuple(Val), tuple_size(Val) > 2 ->
-        %          case has_var(Val) of
-        %          false ->
-        %              do_delete_object(Tid, Ts, Tab, Val, LockKind);
-        %          true ->
-        %              abort({bad_type, Tab, Val})
-        %          end;
-        %      delete_object(_Tid, _Ts, Tab, _Key, _LockKind) ->
-        %          abort({bad_type, Tab}).
+    mnesia:delete_object(Tid, Ts, Tab, Val, LockKind).
 
 read({SyncMode, _Pid}, _Ts, Tab, Key, _LockKind)
     when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
@@ -233,6 +231,13 @@ do_ec_delete(SyncMode, Tab, Key) when is_atom(Tab), Tab /= schema ->
     ec(SyncMode, {Oid, Oid, delete});
 do_ec_delete(_SyncMode, Tab, _Key) ->
     mnesia:abort({bad_type, Tab}).
+
+do_ec_delete_object(SyncMode, Tab, Val)
+    when is_atom(Tab), Tab /= schema, is_tuple(Val), tuple_size(Val) > 2 ->
+    Oid = {Tab, element(2, Val)},
+    ec(SyncMode, {Oid, Val, delete_object});
+do_ec_delete_object(_SyncMode, Tab, Val) ->
+    mnesia:abort({bad_type, Tab, Val}).
 
 ec(Protocol, Item) ->
     {{Tab, Key}, _Val, _Op} = Item,
@@ -392,28 +397,6 @@ receive_msg(Tid, Commit, Tab, {rcv, {sync, From}}) ->
                   end,
                   Deliverable).
 
-%% @doc This function finds all the deliverable commits in the buffer and delivers them
-%% @returns whether the input message should be delivered, and if should be delivered
-%% when it is in the list of deliverables or we are not using causal broadcast.
-%% @end
-% -spec do_receive_msg(term(), #commit{}, mnesia:table()) -> boolean().
-% do_receive_msg(Tid, Commit, Tab) ->
-%     case mnesia_monitor:get_env(causal) of
-%         true ->
-%             D = mnesia_causal:rcv_msg(Tid, Commit, Tab),
-%             dbg_out("found devliverable commits: ~p~n", [D]),
-%             {Deliverable, Local} =
-%                 lists:partition(fun(DInfo) -> DInfo =/= {Tid, Commit, Tab} end, D),
-%             lists:foreach(fun({Tid1, Commit1, Tab1}) ->
-%                              do_async_ec(Tid1, mnesia_tm:new_cr_format(Commit1), Tab1)
-%                           end,
-%                           Deliverable),
-%             length(Local) > 0;
-%         false ->
-%             % if we are not using causal broadcast, we deliver all the messages
-%             true
-%     end.
-
 sync_send_ec(Tid, [Head | Tail], Tab, WaitFor) ->
     Node = Head#commit.node,
     if Node == node() ->
@@ -569,8 +552,10 @@ do_update_op(Tid, Storage, {{Tab, K}, Obj, write}) ->
     commit_write(?catch_val({Tab, commit_work}), Tid, Storage, Tab, K, Obj, undefined),
     mnesia_porset:db_put(Storage, Tab, Obj);
 do_update_op(Tid, Storage, {{Tab, K}, Obj, delete}) ->
-    commit_delete(?catch_val({Tab, commit_work}), Tid, Storage, Tab, K, Obj, undefined),
+    % note here parameter is Obj rather than Val, this is mostly better since we
+    % can always extract the key from the object
     % we send Obj instead of Key for processing
+    commit_delete(?catch_val({Tab, commit_work}), Tid, Storage, Tab, K, Obj, undefined),
     mnesia_porset:db_erase(Storage, Tab, Obj);
 do_update_op(Tid, Storage, {{Tab, K}, {RecName, Incr}, update_counter}) ->
     {NewObj, OldObjs} =
@@ -592,7 +577,7 @@ do_update_op(Tid, Storage, {{Tab, K}, {RecName, Incr}, update_counter}) ->
     element(3, NewObj);
 do_update_op(Tid, Storage, {{Tab, Key}, Obj, delete_object}) ->
     commit_del_object(?catch_val({Tab, commit_work}), Tid, Storage, Tab, Key, Obj),
-    mnesia_lib:db_match_erase(Storage, Tab, Obj);
+    mnesia_porset:db_erase(Storage, Tab, Obj);
 do_update_op(Tid, Storage, {{Tab, Key}, Obj, clear_table}) ->
     commit_clear(?catch_val({Tab, commit_work}), Tid, Storage, Tab, Key, Obj),
     mnesia_lib:db_match_erase(Storage, Tab, Obj).
