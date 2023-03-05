@@ -54,6 +54,8 @@ alias(atomicity) ->
     mnesia_atomicity_test;
 alias(backup) ->
     mnesia_evil_backup;
+alias(causal) ->
+    mnesia_causal_test;
 alias(config) ->
     mnesia_config_test;
 alias(consistency) ->
@@ -62,6 +64,8 @@ alias(dirty) ->
     mnesia_dirty_access_test;
 alias(durability) ->
     mnesia_durability_test;
+alias(ec) ->
+    mnesia_ec_test;
 alias(evil) ->
     mnesia_evil_coverage_test;
 alias(qlc) ->
@@ -86,6 +90,8 @@ alias(medium) ->
     {mnesia_SUITE, medium};
 alias(nice) ->
     mnesia_nice_coverage_test;
+alias(porset) ->
+    mnesia_porset_test;
 alias(recover) ->
     mnesia_recover_test;
 alias(recovery) ->
