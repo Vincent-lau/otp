@@ -131,16 +131,11 @@ read({SyncMode, _Pid}, _Ts, Tab, Key, _LockKind)
 read(_Tid, _Ts, Tab, _Key, _LockKind) ->
     mnesia:abort({bad_type, Tab}).
 
+match_object({SyncMode, _Pid} = Tid, Ts, Tab, Pat, _LockKind)
+    when is_atom(Tab), Tab /= schema, is_tuple(Pat), tuple_size(Pat) > 2 ->
+    ec_match_object(Tab, Pat);
 match_object(Tid, Ts, Tab, Pat, LockKind) ->
-    ok.%             when is_atom(Tab), Tab /= schema, is_tuple(Pat), tuple_size(Pat) > 2 ->
-       %               case element(1, Tid) of
-       %               ets ->
-       %                   mnesia_lib:db_match_object(ram_copies, Tab, Pat);
-       %               _Protocol ->
-       %                   dirty_match_object(Tab, Pat)
-       %               end;
-       %           match_object(_Tid, _Ts, Tab, Pat, _LockKind) ->
-       %               abort({bad_type, Tab, Pat}).
+    mneisa:match_object(Tid, Ts, Tab, Pat, LockKind).
 
 all_keys({SyncMode, _Pid} = Tid, _Ts, Tab, _LockKind)
     when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
@@ -577,7 +572,7 @@ do_update_op(Tid, Storage, {{Tab, K}, {RecName, Incr}, update_counter}) ->
     element(3, NewObj);
 do_update_op(Tid, Storage, {{Tab, Key}, Obj, delete_object}) ->
     commit_del_object(?catch_val({Tab, commit_work}), Tid, Storage, Tab, Key, Obj),
-    mnesia_porset:db_erase(Storage, Tab, Obj);
+    mnesia_porset:db_match_erase(Storage, Tab, Obj);
 do_update_op(Tid, Storage, {{Tab, Key}, Obj, clear_table}) ->
     commit_clear(?catch_val({Tab, commit_work}), Tid, Storage, Tab, Key, Obj),
     mnesia_lib:db_match_erase(Storage, Tab, Obj).
@@ -646,6 +641,61 @@ commit_clear([H | R], Tid, Storage, Tab, K, Obj) when element(1, H) == index ->
 
 %% =============== read operations ===============
 
+ec_rpc(Tab, M, F, Args) ->
+    Node = val({Tab, where_to_read}),
+    do_ec_rpc(Tab, Node, M, F, Args).
+
+do_ec_rpc(_Tab, nowhere, _, _, Args) ->
+    mnesia:abort({no_exists, Args});
+do_ec_rpc(_Tab, Local, M, F, Args) when Local =:= node() ->
+    try
+        apply(M, F, Args)
+    catch
+        Res ->
+            Res;
+        _:_ ->
+            mnesia:abort({badarg, Args})
+    end;
+do_ec_rpc(Tab, Node, M, F, Args) ->
+    case mnesia_rpc:call(Node, M, F, Args) of
+        {badrpc, Reason} ->
+            timer:sleep(20), %% Do not be too eager, and can't use yield on SMP
+            %% Sync with mnesia_monitor
+            _ = try
+                    sys:get_status(mnesia_monitor)
+                catch
+                    _:_ ->
+                        ok
+                end,
+            case mnesia_controller:call({check_w2r, Node, Tab}) % Sync
+            of
+                NewNode when NewNode =:= Node ->
+                    ErrorTag = mnesia_lib:dirty_rpc_error_tag(Reason),
+                    mnesia:abort({ErrorTag, Args});
+                NewNode ->
+                    case get(mnesia_activity_state) of
+                        {_Mod, Tid, _Ts} when is_record(Tid, tid) ->
+                            %% In order to perform a consistent
+                            %% retry of a transaction we need
+                            %% to acquire the lock on the NewNode.
+                            %% In this context we do neither know
+                            %% the kind or granularity of the lock.
+                            %% --> Abort the transaction
+                            mnesia:abort({node_not_running, Node});
+                        {error, {node_not_running, _}} ->
+                            %% Mnesia is stopping
+                            mnesia:abort({no_exists, Args});
+                        _ ->
+                            %% Splendid! A dirty retry is safe
+                            %% 'Node' probably went down now
+                            %% Let mnesia_controller get broken link message first
+                            do_ec_rpc(Tab, NewNode, M, F, Args)
+                    end
+            end;
+        Other ->
+            Other
+    end.
+
 ec_read(Tab, Key) ->
     mnesia_porset:db_get(Tab, Key).
 
@@ -663,6 +713,18 @@ ec_prev(Tab, Key) ->
 
 ec_next(Tab, Key) ->
     mnesia_porset:db_next_key(Tab, Key).
+
+-spec ec_match_object(Tab, Pattern) -> [Record]
+    when Tab :: mnesia:table(),
+         Pattern :: tuple(),
+         Record :: tuple().
+ec_match_object(Tab, Pat)
+    when is_atom(Tab), Tab /= schema, is_tuple(Pat), tuple_size(Pat) > 2 ->
+    ec_rpc(Tab, mnesia_porset, remote_match_object, [Tab, Pat]);
+ec_match_object(Tab, Pat) ->
+    mnesia:abort({bad_type, Tab, Pat}).
+
+
 
 ec_index_match_object(Tab, Pat, Attr) ->
     unimplemnted.

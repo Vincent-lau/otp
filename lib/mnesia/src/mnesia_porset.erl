@@ -23,8 +23,9 @@
 -include("mnesia.hrl").
 
 -export([db_put/3, db_erase/3, db_get/2, db_first/1, db_last_key/1, db_next_key/2,
-         db_select/2, db_prev/2, db_all_keys/1]).
+         db_select/2, db_prev/2, db_all_keys/1, db_match_erase/3]).
 -export([mktab/2, unsafe_mktab/2]).
+-export([remote_match_object/2]).
 
 -type op() :: write | delete.
 -type val() :: any().
@@ -59,6 +60,8 @@ unsafe_mktab(Tab, [{keypos, 2}, public, named_table, Type | EtsOpts])
 porset_name(Tab) ->
     {list_to_atom(atom_to_list(Tab)), list_to_atom(atom_to_list(Tab) ++ "_tlog")}.
 
+%%==================== writes ====================
+
 -spec effect(storage(), mnesia:table(), tuple()) -> ok.
 effect(Storage, Tab, Tup) ->
     case causal_compact(Storage, Tab, obj2ele(Tup)) of
@@ -69,22 +72,6 @@ effect(Storage, Tab, Tup) ->
         false ->
             dbg_out("redundant", []),
             ok
-    end.
-
-db_all_keys(Tab) when is_atom(Tab), Tab /= schema ->
-    Pat0 = val({Tab, wild_pattern}),
-    Pat1 =
-        erlang:append_element(
-            erlang:append_element(Pat0, '_'), write),
-    Pat = setelement(2, Pat1, '$1'),
-    Keys = db_select(Tab, [{Pat, [], ['$1']}]),
-    case val({Tab, setorbag}) of
-        porbag ->
-            mnesia_lib:uniq(Keys);
-        porset ->
-            Keys;
-        Other ->
-            error({incorrect_ec_table_type, Other})
     end.
 
 db_put(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
@@ -114,6 +101,23 @@ maybe_create_index(Tab, Index) ->
             mnesia:add_table_index(Tab, Index)
     end.
 
+db_erase(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
+    Ts = element(tuple_size(Obj), Obj),
+    dbg_out("running my own delete function and table ~p with val ~p and "
+            "ts ~p~n",
+            [Tab, Obj, Ts]),
+    Tup = add_op(Obj, delete),
+    effect(Storage, Tab, Tup);
+db_erase(_S, _T, Obj) ->
+    error("bad tuple ~p, no ts at the end~n", [Obj]).
+
+% used for delete_object, hence pattern cannot be a pattern
+db_match_erase(Storage, Tab, Pat) ->
+    dbg_out("running my own match delete function on ~p~n", [Tab]),
+    db_erase(Storage, Tab, Pat).
+
+%%==================== reads ====================
+
 db_get(Tab, Key) ->
     Res = mnesia_lib:db_get(Tab, Key),
     Res2 =
@@ -125,15 +129,7 @@ db_get(Tab, Key) ->
                         end,
                         Res),
     dbg_out("running my own lookup function on ~p, got ~p~n", [Tab, Res2]),
-    case val({Tab, setorbag}) of
-        porset ->
-            Res3 = mnesia_lib:uniq(Res2),
-            resolve_cc_add(Res3);
-        porbag ->
-            Res2;
-        Other ->
-            error({bad_val, Other})
-    end.
+    uniq(Tab, Res2).
 
 -spec resolve_cc_add([element()]) -> [element()].
 resolve_cc_add(Res) when length(Res) =< 1 ->
@@ -142,41 +138,66 @@ resolve_cc_add(Res) ->
     dbg_out("selecting minimum element from ~p to resolve concurrent addition~n", [Res]),
     [lists:min(Res)].
 
-db_erase(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
-    Ts = element(tuple_size(Obj), Obj),
-    dbg_out("running my own delete function and table ~p with val ~p and "
-            "ts ~p~n",
-            [Tab, Obj, Ts]),
-    Tup = add_op(Obj, delete),
-    effect(Storage, Tab, Tup);
-db_erase(_S, _T, Obj) ->
-    error("bad tuple ~p, no ts at the end~n", [Obj]).
+db_all_keys(Tab) when is_atom(Tab), Tab /= schema ->
+    Pat0 = val({Tab, wild_pattern}),
+    Pat = setelement(2, Pat0, '$1'),
+    Keys = db_select(Tab, [{Pat, [], ['$1']}]),
+    case val({Tab, setorbag}) of
+        porbag ->
+            mnesia_lib:uniq(Keys);
+        porset ->
+            Keys;
+        Other ->
+            error({incorrect_ec_table_type, Other})
+    end.
 
-db_match_erase(Storage, Tab, Pat) ->
-    dbg_out("running my own match delete function on ~p~n", [Tab]),
+remote_match_object(Tab, Pat) ->
+    Key = element(2, Pat),
+    case mnesia:has_var(Key) of
+        false ->
+            db_match_object(Tab, Pat);
+        true ->
+            PosList = regular_indexes(Tab),
+            remote_match_object(Tab, Pat, PosList)
+    end.
+
+remote_match_object(Tab, Pat, [Pos | Tail]) when Pos =< tuple_size(Pat) ->
+    IxKey = element(Pos, Pat),
+    case mnesia:has_var(IxKey) of
+        false ->
+            % TODO maybe a good idea to do filtermap afterwards
+            % benchmark to see
+            Pat1 = pat_pad(Pat, write),
+            mnesia_index:dirty_match_object(Tab, Pat1, Pos);
+        true ->
+            remote_match_object(Tab, Pat, Tail)
+    end;
+remote_match_object(Tab, Pat, []) ->
+    db_match_object(Tab, Pat);
+remote_match_object(Tab, Pat, _PosList) ->
+    mnesia:abort({bad_type, Tab, Pat}).
+
+regular_indexes(Tab) ->
+    PosList = val({Tab, index}),
+    [P || P <- PosList, is_integer(P)].
+
+db_match_object(Tab, Pat0) ->
+    dbg_out("running my own match object function on ~p~n", [Tab]),
+    Pat = pat_pad(Pat0, write),
+    Res = mnesia_lib:db_match_object(Tab, Pat),
     case val({Tab, setorbag}) of
         porset ->
-            mnesia_lib:db_match_delete(Storage, Tab, Pat);
+            Res1 = clear_meta_for_user(Res),
+            uniq(Tab, Res1);
         porbag ->
-            mnesia_lib:db_match_delete(Storage, Tab, Pat);
+            clear_meta_for_user(Res);
         Other ->
             error({bad_val, Other})
     end.
 
-match_delete(porset_copies, Tab, Pat) ->
-    ets:match_delete(
-        mnesia_lib:val({?MODULE, Tab}), Pat).
-
 db_first(Tab) ->
     dbg_out("running my own first function on ~p~n", [Tab]),
     mnesia_lib:db_first(Tab).
-
-first(porset_copies, Tab) ->
-    ets:first(
-        mnesia_lib:val({?MODULE, Tab})).
-
-last(Alias, Tab) ->
-    first(Alias, Tab).
 
 db_last_key(Tab) ->
     dbg_out("running my own last function on ~p~n", [Tab]),
@@ -194,19 +215,14 @@ db_prev(Tab, Key) ->
     dbg_out("running my own prev function on ~p", [Tab]),
     mnesia_lib:db_prev_key(Tab, Key).
 
-prev(Alias, Tab, Key) ->
-    next(Alias, Tab, Key).
-
-slot(porset_copies, Tab, Pos) ->
-    ets:slot(
-        mnesia_lib:val({?MODULE, Tab}), Pos).
-
 update_counter(porset_copies, Tab, C, Val) ->
     ets:update_counter(
         mnesia_lib:val({?MODULE, Tab}), C, Val).
 
 db_select(Tab, Spec) ->
-    Res = mnesia_lib:db_select(Tab, Spec),
+    Spec1 =
+        [{pat_pad(MatchHead, write), Guards, Results} || {MatchHead, Guards, Results} <- Spec],
+    Res = mnesia_lib:db_select(Tab, Spec1),
     dbg_out("running my own select function on ~p with spec ~p got ~p", [Tab, Spec, Res]),
     Res.
 
@@ -236,7 +252,28 @@ select(porset_copies, Tab, Ms, Limit) when is_integer(Limit); Limit =:= infinity
 repair_continuation(Cont, Ms) ->
     ets:repair_continuation(Cont, Ms).
 
-%%% pure op-based orset implementation
+
+clear_meta_for_user(Tups) ->
+    [get_val_tup(Tup) || Tup <- Tups].
+
+
+uniq(Tab, Res) ->
+    case val({Tab, setorbag}) of
+        porset ->
+            Res1 = mnesia_lib:uniq(Res),
+            resolve_cc_add(Res1);
+        porbag ->
+            Res;
+        Other ->
+            error({bad_val, Other})
+    end.
+
+
+
+
+
+
+%%% ==========pure op-based orset implementation==========
 
 %% removes obsolete elements
 %% @returns whether this element should be added
@@ -293,10 +330,7 @@ redundant(Storage, Tab, Ele) ->
     dbg_out("generated ~p~n", [Eles2]),
     lists:any(fun(Ele2) -> obsolete(Tab, Ele, Ele2) end, Eles2).
 
-% TODO there might be better ways of doing the scan
-%% removes elements that are obsoleted by Ele
-%% When we check for elements obsoleted by Ele, we only care about those with
-%% the same key as Ele, no need to go through the entire table
+%% @edoc removes elements that are obsoleted by Ele
 -spec remove_obsolete(storage(), mnesia:table(), element()) -> ok.
 remove_obsolete(Storage, Tab, Ele) ->
     dbg_out("checking obsolete~n", []),
@@ -309,6 +343,20 @@ remove_obsolete(Storage, Tab, Ele) ->
     mnesia_lib:db_erase(Storage, Tab, Key),
     mnesia_lib:db_put(Storage, Tab, Keep),
     ok.
+
+%% only called when we do match delete
+% -spec match_remove_obsolete(storage(), mnesia:table(), tuple()) -> ok.
+% match_remove_obsolete(Storage, Tab, Pat0)->
+%     dbg_out("matching obsolete~n", []),
+%     Pat = pat_pad(Pat0, write),
+%     Tups = mnesia_lib:db_match_object(Storage, Tab, Pat),
+%     Keep = lists:filter(fun(Tup) -> not obsolete(Tab, obj2ele(Tup), Ele) end, Tups),
+%     % dbg_out("key ~p~n", [Key]),
+%     % dbg_out("existing tuples ~p~n", [Tups]),
+%     % dbg_out("removed obsolete ~p kept ~p~n", [Tups -- Keep, Keep]),
+%     mnesia_lib:db_erase(Storage, Tab, Key),
+%     mnesia_lib:db_put(Storage, Tab, Keep),
+%     ok.
 
 %%% Helper
 
@@ -390,3 +438,8 @@ delete_meta(Obj) ->
 
 tup_is_write(Tup) ->
     get_op(Tup) =:= write.
+
+pat_pad(Pat, Op) ->
+    erlang:append_element(
+        erlang:append_element(Pat, '_'), Op).
+
