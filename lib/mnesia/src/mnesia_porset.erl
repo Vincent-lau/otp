@@ -252,10 +252,8 @@ select(porset_copies, Tab, Ms, Limit) when is_integer(Limit); Limit =:= infinity
 repair_continuation(Cont, Ms) ->
     ets:repair_continuation(Cont, Ms).
 
-
 clear_meta_for_user(Tups) ->
     [get_val_tup(Tup) || Tup <- Tups].
-
 
 uniq(Tab, Res) ->
     case val({Tab, setorbag}) of
@@ -267,11 +265,6 @@ uniq(Tab, Res) ->
         Other ->
             error({bad_val, Other})
     end.
-
-
-
-
-
 
 %%% ==========pure op-based orset implementation==========
 
@@ -442,4 +435,3 @@ tup_is_write(Tup) ->
 pat_pad(Pat, Op) ->
     erlang:append_element(
         erlang:append_element(Pat, '_'), Op).
-
