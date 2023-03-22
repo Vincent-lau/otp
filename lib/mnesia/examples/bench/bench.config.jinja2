@@ -1,25 +1,18 @@
 {cookie,bench_cookie}.
-{generator_profile,async_ec}.
+{activity, {{ activity }} }.
+{generator_profile, {{ generator_profile }} }.
 {statistics_detail,debug}.
 {generator_warmup,12000}.
 {generator_duration,  		90000}.
 {generator_cooldown,  		12000}.
-{generator_nodes,         	
- ['bench1@vincent-pc'
- ]}.
+{generator_nodes,         {{ generator_nodes }}	}.
 {use_binary_subscriber_key, 	false}.
 {n_generators_per_node, 	2}.
 {write_lock_type,		sticky_write}.
-{table_nodes,         	
- ['bench1@vincent-pc',
-  'bench2@vincent-pc',
-  'bench3@vincent-pc',
-  'bench4@vincent-pc',
-  'bench5@vincent-pc'
- ]}.
+{table_nodes,         	 {{ table_nodes }} }.
 {storage_type, 			ram_copies}.
-{n_replicas,   			1}.
+{n_replicas,   			{{ n_replicas }} }.
 {n_fragments,  			1}.
-{n_subscribers,		        5000}.
+{n_subscribers,		        {{ n_subscribers }} }.
 {n_groups,     		        100}.
 {n_servers,    		        20}.
