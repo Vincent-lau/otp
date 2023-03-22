@@ -47,12 +47,12 @@ start(C) when is_record(C, config) ->
            populate_group(write, C),
            populate_server(write, C)
         end,
-    case C#config.generator_profile of
+    case C#config.activity of
         async_ec ->
-            ?d("    Populate database in async mode...~n", []),
+            ?d("    Populate database in ec mode...~n", []),
             mnesia:activity(sync_ec, Populate, [], mnesia_ec);
         _Other ->
-            ?d("    Populate database in sync mode...~n", []),
+            ?d("    Populate database in normal mode...~n", []),
             mnesia:activity(sync_dirty, Populate, [], mnesia_frag)
     end.
 
@@ -60,7 +60,8 @@ start(C) when is_record(C, config) ->
 %% Create the tables
 %% -------------------------------------------------------------------
 
-create_tables(C) when C#config.generator_profile =:= async_ec ->
+create_tables(C) when 
+    C#config.activity =:= async_ec ->
     ?d("    Delete old tables...~n", []),
     mnesia:delete_table(group),
     mnesia:delete_table(subscriber),

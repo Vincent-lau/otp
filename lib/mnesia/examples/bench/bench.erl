@@ -247,6 +247,12 @@ verify_config([{Tag, Val} | T], C) ->
     case Tag of
         cookie when is_atom(Val) ->
             verify_config(T, C#config{cookie = Val});
+        activity when Val =:= transaction ->
+            verify_config(T, C#config{activity = Val});
+        activity when Val =:= async_dirty ->
+            verify_config(T, C#config{activity = Val});
+        activity when Val =:= async_ec ->
+            verify_config(T, C#config{activity = Val});
         generator_profile when Val == async_ec ->
             verify_config(T, C#config{generator_profile = Val});
         generator_profile when Val == async_dirty ->

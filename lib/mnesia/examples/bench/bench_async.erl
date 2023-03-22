@@ -40,7 +40,8 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %% -------------------------------------------------------------------
-%% T1
+%% T1 - Update current location
+%% read a subscriber record and update its location
 %% -------------------------------------------------------------------
 
 update_current_location(Wlock, SubscrId, Location, ChangedBy, ChangedTime) ->
@@ -53,12 +54,12 @@ update_current_location(Wlock, SubscrId, Location, ChangedBy, ChangedTime) ->
     {do_commit, false, [ok]}.
 
 %% -------------------------------------------------------------------
-%% T2
+%% T2 - Read current location
+%% Just read a subscriber record and return its information
 %% -------------------------------------------------------------------
 
 read_current_location(_Wlock, SubscrId) ->
-    Suffix = number_to_suffix(SubscrId),
-    [Subscr] = mnesia:read(subscriber, Suffix, SubscrId, read),
+    Subscr = busy_read(subscriber, SubscrId),
 
     Name = Subscr#subscriber.subscriber_name,
     Location = Subscr#subscriber.location,
@@ -67,14 +68,18 @@ read_current_location(_Wlock, SubscrId) ->
     {do_commit, false, [Name, Location, ChangedBy, ChangedTime]}.
 
 %% -------------------------------------------------------------------
-%% T3
+%% T3 - Read session details
+%% Read a subscriber record, and the group to which it belongs.
+%% Read the session of the subscriber and the server
+%% update the server table on number of reads
+%% return the session details
 %% -------------------------------------------------------------------
 
 read_session_details(Wlock, SubscrId, ServerBit, ServerId) ->
     Suffix = number_to_suffix(SubscrId),
-    [Subscr] = mnesia:read(subscriber, SubscrId, read),
+    Subscr = busy_read(subscriber, SubscrId),
     %%[Group]  = mnesia:read(group, Subscr#subscriber.group_id, read),
-    [Group] = mnesia:dirty_read(group, Subscr#subscriber.group_id),
+    Group = busy_read(group, Subscr#subscriber.group_id),
 
     IsAllowed = Group#group.allow_read band ServerBit == ServerBit,
     IsActive = Subscr#subscriber.active_sessions band ServerBit == ServerBit,
@@ -83,10 +88,10 @@ read_session_details(Wlock, SubscrId, ServerBit, ServerId) ->
     case ExecuteBranch of
         true ->
             SessionKey = {SubscrId, ServerId},
-            [Session] = mnesia:read(session, SessionKey, read),
+            Session = busy_read(session, SessionKey),
 
             ServerKey = {ServerId, Suffix},
-            [Server] = mnesia:read(server, ServerKey, Wlock),
+            Server = busy_read(server, ServerKey),
             Server2 = Server#server{no_of_read = Server#server.no_of_read + 1},
             mnesia:write(server, Server2, Wlock),
             {do_commit, ExecuteBranch, [Session#session.session_details]};
@@ -95,14 +100,19 @@ read_session_details(Wlock, SubscrId, ServerBit, ServerId) ->
     end.
 
 %% -------------------------------------------------------------------
-%% T4
+%% T4 - Create session to server
+%% Read a subscriber record, and the group to which it belongs.
+%% create a new session for the subscriber and server and write into subscriber,
+%% and subscriber table
+%% update the server table on number of inserts
+%% 
 %% -------------------------------------------------------------------
 
 create_session_to_server(Wlock, SubscrId, ServerBit, ServerId, Details, DoRollback) ->
     Suffix = number_to_suffix(SubscrId),
-    [Subscr] = mnesia:read(subscriber, SubscrId, Wlock),
+    Subscr = busy_read(subscriber, SubscrId),
     %%[Group]  = mnesia:read(group, Subscr#subscriber.group_id, read),
-    [Group] = mnesia:dirty_read(group, Subscr#subscriber.group_id),
+    Group = busy_read(group, Subscr#subscriber.group_id),
 
     IsAllowed = Group#group.allow_insert band ServerBit == ServerBit,
     IsInactive = Subscr#subscriber.active_sessions band ServerBit == 0,
@@ -120,7 +130,7 @@ create_session_to_server(Wlock, SubscrId, ServerBit, ServerId, Details, DoRollba
             mnesia:write(subscriber, Subscr2, Wlock),
 
             ServerKey = {ServerId, Suffix},
-            [Server] = mnesia:read(server, ServerKey, Wlock),
+            Server = busy_read(server, ServerKey),
             Server2 = Server#server{no_of_insert = Server#server.no_of_insert + 1},
             mnesia:write(server, Server2, Wlock);
         false ->
@@ -134,14 +144,15 @@ create_session_to_server(Wlock, SubscrId, ServerBit, ServerId, Details, DoRollba
     end.
 
 %% -------------------------------------------------------------------
-%% T5
+%% T5 - Delete session from server
+%% Inverse of T4, delete the session and update the server table
 %% -------------------------------------------------------------------
 
 delete_session_from_server(Wlock, SubscrId, ServerBit, ServerId, DoRollback) ->
     Suffix = number_to_suffix(SubscrId),
-    [Subscr] = mnesia:read(subscriber, SubscrId, Wlock),
+    Subscr = busy_read(subscriber, SubscrId),
     %%[Group]  = mnesia:read(group, Subscr#subscriber.group_id, read),
-    [Group] = mnesia:dirty_read(group, Subscr#subscriber.group_id),
+    Group = busy_read(group, Subscr#subscriber.group_id),
 
     IsAllowed = Group#group.allow_delete band ServerBit == ServerBit,
     IsActive = Subscr#subscriber.active_sessions band ServerBit == ServerBit,
@@ -155,7 +166,7 @@ delete_session_from_server(Wlock, SubscrId, ServerBit, ServerId, DoRollback) ->
             mnesia:write(subscriber, Subscr2, Wlock),
 
             ServerKey = {ServerId, Suffix},
-            [Server] = mnesia:read(server, ServerKey, Wlock),
+            Server = busy_read(server, ServerKey),
             Server2 = Server#server{no_of_delete = Server#server.no_of_delete + 1},
             mnesia:write(server, Server2, Wlock);
         false ->

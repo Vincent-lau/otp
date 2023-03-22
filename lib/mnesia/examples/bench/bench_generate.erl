@@ -34,7 +34,6 @@
 %% Internal
 -export([monitor_init/2, generator_init/2, worker_init/1]).
 
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% The traffic generator
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -77,7 +76,11 @@ warmup_sticky(C) ->
     Fun = fun(S) ->
              {[Node | _], _, Wlock} = nearest_node(S, transaction, C),
              Stick = fun() -> [mnesia:read({T, S}, S, Wlock) || T <- Tabs] end,
-             Args = [transaction, Stick, [], mnesia],
+             Mod = case C#config.activity of
+                       async_ec -> mnesia_ec;
+                       _ -> mnesia_frag
+                   end,
+             Args = [transaction, Stick, [], Mod],
              rpc:call(Node, mnesia, activity, Args)
           end,
     Suffixes = lists:seq(0, C#config.n_fragments - 1), % Assume even distrib.
@@ -189,13 +192,15 @@ generator_loop(Monitor, C, SessionTab, Counters) ->
             generator_loop(Monitor, C, SessionTab, Counters)
     after 0 ->
         {Name, {Nodes, Activity, Wlock}, Fun, CommitSessions} = gen_traffic(C, SessionTab),
+        Mod = case C#config.activity of
+                  async_dirty ->
+                      mnesia;
+                  async_ec ->
+                      mnesia;
+                  _ ->
+                      mnesia_frag
+              end,
         Before = erlang:monotonic_time(),
-        Mod = case C#config.generator_profile of
-            async_ec ->
-                mnesia;
-            _ ->
-                mnesia_frag
-        end,
         Res = call_worker(Nodes, Activity, Fun, Wlock, Mod),
         After = erlang:monotonic_time(),
         Elapsed = elapsed(Before, After),
@@ -203,9 +208,9 @@ generator_loop(Monitor, C, SessionTab, Counters) ->
     end.
 
 %% Perform a transaction on a node near the data
-call_worker([Node | _], async_ec, Fun, Wlock, _Mod) when Node == node() ->
-    {Node, catch mnesia:activity(async_ec, Fun, [Wlock], mnesia_ec)};
-call_worker([Node | _], Activity, Fun, Wlock, Mod) when Node == node() ->
+call_worker([Node | _], async_ec, Fun, Wlock, _Mod) when Node =:= node() ->
+    {Node, mnesia:activity(async_ec, Fun, [Wlock], mnesia_ec)};
+call_worker([Node | _], Activity, Fun, Wlock, Mod) when Node =:= node() ->
     {Node, catch mnesia:activity(Activity, Fun, [Wlock], Mod)};
 call_worker([Node | _] = Nodes, Activity, Fun, Wlock, Mod) ->
     Key = {worker, Node},
@@ -368,7 +373,8 @@ commit_session(Fun) when is_function(Fun, 0) ->
     Fun().
 
 %% Randlomly choose a transaction type according to benchmark spec
-gen_traffic(C, SessionTab) when C#config.generator_profile == random ->
+gen_traffic(C, SessionTab)
+    when C#config.activity =:= transaction, C#config.generator_profile == random ->
     case rand:uniform(100) of
         Rand when Rand > 0, Rand =< 25 ->
             gen_t1(C, SessionTab);
@@ -382,11 +388,22 @@ gen_traffic(C, SessionTab) when C#config.generator_profile == random ->
             gen_t5(C, SessionTab)
     end;
 gen_traffic(C, SessionTab)
-    when C#config.generator_profile =:= async_ec
-         orelse C#config.generator_profile =:= async_dirty ->
-    Activity = C#config.generator_profile,
-    gen_async(C, SessionTab, Activity);
-gen_traffic(C, SessionTab) ->
+    when (C#config.activity =:= async_ec orelse C#config.activity =:= async_dirty)
+         andalso C#config.generator_profile =:= random ->
+    Activity = C#config.activity,
+    case rand:uniform(100) of
+        Rand when Rand > 0, Rand =< 25 ->
+            gen_async1(C, SessionTab, Activity);
+        Rand when Rand > 25, Rand =< 50 ->
+            gen_async2(C, SessionTab, Activity);
+        Rand when Rand > 50, Rand =< 70 ->
+            gen_async3(C, SessionTab, Activity);
+        Rand when Rand > 70, Rand =< 85 ->
+            gen_async4(C, SessionTab, Activity);
+        Rand when Rand > 85, Rand =< 100 ->
+            gen_async5(C, SessionTab, Activity)
+    end;
+gen_traffic(C, SessionTab) when C#config.activity =:= transaction ->
     case C#config.generator_profile of
         t1 ->
             gen_t1(C, SessionTab);
@@ -400,9 +417,35 @@ gen_traffic(C, SessionTab) ->
             gen_t5(C, SessionTab);
         ping ->
             gen_ping(C, SessionTab)
+    end;
+gen_traffic(C, SessionTab) when C#config.activity =:= async_dirty ->
+    case C#config.generator_profile of
+        t1 ->
+            gen_async1(C, SessionTab, async_dirty);
+        t2 ->
+            gen_async2(C, SessionTab, async_dirty);
+        t3 ->
+            gen_async3(C, SessionTab, async_dirty);
+        t4 ->
+            gen_async4(C, SessionTab, async_dirty);
+        t5 ->
+            gen_async5(C, SessionTab, async_dirty)
+    end;
+gen_traffic(C, SessionTab) when C#config.activity =:= async_ec ->
+    case C#config.generator_profile of
+        t1 ->
+            gen_async1(C, SessionTab, async_ec);
+        t2 ->
+            gen_async2(C, SessionTab, async_ec);
+        t3 ->
+            gen_async3(C, SessionTab, async_ec);
+        t4 ->
+            gen_async4(C, SessionTab, async_ec);
+        t5 ->
+            gen_async5(C, SessionTab, async_ec)
     end.
 
-gen_async(C, _SessionTab, AsyncAct)
+gen_async1(C, _SessionTab, AsyncAct)
     when AsyncAct =:= async_dirty orelse AsyncAct =:= async_ec ->
     SubscrId = rand:uniform(C#config.n_subscribers) - 1,
     SubscrKey = bench_async:number_to_key(SubscrId, C),
@@ -415,6 +458,104 @@ gen_async(C, _SessionTab, AsyncAct)
         bench_async:update_current_location(Wlock, SubscrKey, Location, ChangedBy, ChangedTime)
      end,
      no_fun}.
+
+gen_async2(C, _SessionTab, AsyncAct)
+    when AsyncAct =:= async_dirty orelse AsyncAct =:= async_ec ->
+    SubscrId = rand:uniform(C#config.n_subscribers) - 1,
+    SubscrKey = bench_async:number_to_key(SubscrId, C),
+    {t2,
+     nearest_node(SubscrId, AsyncAct, C),
+     fun(Wlock) -> bench_async:read_current_location(Wlock, SubscrKey) end,
+     no_fun}.
+
+gen_async3(C, SessionTab, AsyncAct)
+    when AsyncAct =:= async_dirty orelse AsyncAct =:= async_ec ->
+    case ets:first(SessionTab) of
+        '$end_of_table' ->
+            %% This generator does not have any session,
+            %% try reading someone elses session details
+            SubscrId = rand:uniform(C#config.n_subscribers) - 1,
+            SubscrKey = bench_async:number_to_key(SubscrId, C),
+            ServerId = rand:uniform(C#config.n_servers) - 1,
+            ServerBit = 1 bsl ServerId,
+            {t3,
+             nearest_node(SubscrId, AsyncAct, C),
+             fun(Wlock) -> bench_async:read_session_details(Wlock, SubscrKey, ServerBit, ServerId)
+             end,
+             no_fun};
+        {SubscrId, SubscrKey, ServerId} ->
+            %% This generator do have a session,
+            %% read its session details
+            ServerBit = 1 bsl ServerId,
+            {t3,
+             nearest_node(SubscrId, AsyncAct, C),
+             fun(Wlock) -> bench_async:read_session_details(Wlock, SubscrKey, ServerBit, ServerId)
+             end,
+             no_fun}
+    end.
+
+gen_async4(C, SessionTab, AsyncAct)
+    when AsyncAct =:= async_dirty orelse AsyncAct =:= async_ec ->
+    %% This generator may already have sessions,
+    %% create a new session and hope that no other
+    %% generator already has occupied it
+    SubscrId = rand:uniform(C#config.n_subscribers) - 1,
+    SubscrKey = bench_async:number_to_key(SubscrId, C),
+    ServerId = rand:uniform(C#config.n_servers) - 1,
+    ServerBit = 1 bsl ServerId,
+    Details = <<4711:(8 * 2000)>>,
+    DoRollback = rand:uniform(100) =< 2,
+    Insert = fun() -> ets:insert(SessionTab, {{SubscrId, SubscrKey, ServerId}, self()}) end,
+    {t4,
+     nearest_node(SubscrId, AsyncAct, C),
+     fun(Wlock) ->
+        bench_async:create_session_to_server(Wlock,
+                                             SubscrKey,
+                                             ServerBit,
+                                             ServerId,
+                                             Details,
+                                             DoRollback)
+     end,
+     Insert}.
+
+gen_async5(C, SessionTab, AsyncAct)
+    when AsyncAct =:= async_dirty orelse AsyncAct =:= async_ec ->
+    case ets:first(SessionTab) of
+        '$end_of_table' ->
+            %% This generator does not have any session,
+            %% try to delete someone elses session details
+            SubscrId = rand:uniform(C#config.n_subscribers) - 1,
+            SubscrKey = bench_async:number_to_key(SubscrId, C),
+            ServerId = rand:uniform(C#config.n_servers) - 1,
+            ServerBit = 1 bsl ServerId,
+            DoRollback = rand:uniform(100) =< 2,
+            {t5,
+             nearest_node(SubscrId, AsyncAct, C),
+             fun(Wlock) ->
+                bench_async:delete_session_from_server(Wlock,
+                                                       SubscrKey,
+                                                       ServerBit,
+                                                       ServerId,
+                                                       DoRollback)
+             end,
+             no_fun};
+        {SubscrId, SubscrKey, ServerId} ->
+            %% This generator do have at least one session,
+            %% delete it.
+            ServerBit = 1 bsl ServerId,
+            DoRollback = rand:uniform(100) =< 2,
+            Delete = fun() -> ets:delete(SessionTab, {SubscrId, SubscrKey, ServerId}) end,
+            {t5,
+             nearest_node(SubscrId, AsyncAct, C),
+             fun(Wlock) ->
+                bench_async:delete_session_from_server(Wlock,
+                                                       SubscrKey,
+                                                       ServerBit,
+                                                       ServerId,
+                                                       DoRollback)
+             end,
+             Delete}
+    end.
 
 gen_t1(C, _SessionTab) ->
     SubscrId = rand:uniform(C#config.n_subscribers) - 1,
@@ -572,11 +713,13 @@ pick_node(Suffix, C, Nodes) ->
     lists:nth(N, Ordered).
 
 display_statistics(Stats, C) ->
+    io:format("Stats: ~p~n", [Stats]),
     GoodStats = [{node(GenPid), GenStats} || {GenPid, GenStats} <- Stats, is_list(GenStats)],
     FlatStats =
         [{Type, Name, EvalNode, GenNode, Count}
          || {GenNode, GenStats} <- GoodStats, {{Type, Name, EvalNode}, Count} <- GenStats],
     TotalStats = calc_stats_per_tag(lists:keysort(2, FlatStats), 2, []),
+    io:format("Total statistics: ~p~n", [TotalStats]),
     {value, {n_aborts, 0, NA, 0, 0}} =
         lists:keysearch(n_aborts, 1, TotalStats ++ [{n_aborts, 0, 0, 0, 0}]),
     {value, {n_commits, NC, 0, 0, 0}} =
@@ -596,9 +739,11 @@ display_statistics(Stats, C) ->
     ?d("Benchmark result...~n", []),
     ?d("~n", []),
     Kind =
-        case C#config.generator_profile of
+        case C#config.activity of
             async_ec ->
-                async;
+                ec;
+            async_dirty ->
+                dirty;
             _Other ->
                 transaction
         end,
