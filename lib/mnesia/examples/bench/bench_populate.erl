@@ -70,7 +70,7 @@ create_tables(C) when
     mnesia:delete_table(suffix),
 
     ?d("    Creating ~p tables, with ~p replicas distributed over ~p "
-       "nodes...~n",
+       "nodes... in ec mode~n",
        [C#config.storage_type, C#config.n_replicas, length(C#config.table_nodes)]),
 
     %% Create group table

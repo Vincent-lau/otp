@@ -9,9 +9,14 @@ log_file = '~/proj/hypermnesia/benchmark/foo1.txt'
 n_replicas = 3
 table_nodes = [f'bench{i}@vincent-pc' for i in range(1, n_replicas + 1)]
 default_params = {
-    'activity': 'transaction',
-    'generator_profile': 't2',
-    'generator_nodes': ['bench1@vincent-pc'],
+    'activity': 'async_ec',
+    'generator_profile': 't1',
+    'statistics_detail': 'debug3',
+    'generator_warmup': 12000,
+    'generator_duration': 90000,
+    'generator_cooldown': 12000,
+    'generator_nodes': table_nodes,
+    'n_generators_per_node': 1,
     'table_nodes': table_nodes,
     'n_replicas': 3,
     'n_subscribers': 5000,
@@ -22,17 +27,17 @@ def change_nodes(n_replicas: int) -> dict():
     table_nodes = [f'bench{i}@vincent-pc' for i in range(1, n_replicas + 1)]
     params = default_params.copy()
     params['table_nodes'] = table_nodes
+    params['generator_nodes'] = table_nodes
     params['n_replicas'] = n_replicas
-    if n_replicas > 1:
-        params['generator_nodes'] = [f'bench{i}@vincent-pc' for i in range(1, 3)]
+
 
     return params
+
 
 def change_activity(activity: str) -> dict():
     params = default_params.copy()
     params['activity'] = activity
-    if n_replicas > 1:
-        params['generator_nodes'] = [f'bench{i}@vincent-pc' for i in range(1, 3)]
+
 
     return params
 
@@ -44,10 +49,15 @@ def gen_config(params):
 
     filename = "bench0.config"
     content = template.render(
-        activity = params['activity'],
+        activity=params['activity'],
         generator_profile=params['generator_profile'],
-        table_nodes=params['table_nodes'],
+        generator_warmup=params['generator_warmup'],
+        generator_duration=params['generator_duration'],
+        generator_cooldown=params['generator_cooldown'],
+        statistics_detail=params['statistics_detail'],
         generator_nodes=params['generator_nodes'],
+        n_generators_per_node=params['n_generators_per_node'],
+        table_nodes=params['table_nodes'],
         n_replicas=params['n_replicas'],
         n_subscribers=params['n_subscribers'],
     )
@@ -57,10 +67,13 @@ def gen_config(params):
 
 
 def main():
-    for i in range(3, 5, 2):
+    for i in range(5, 6, 2):
         params = change_nodes(i)
         gen_config(params)
-        os.system(f'echo ================================================================================ >> {log_file}')
+        os.system(f'echo >> {log_file}')
+        os.system(f'echo >> {log_file}')
+        os.system(
+            f'echo ================================================================================ >> {log_file}')
         os.system(f'date >> {log_file}')
         os.system(f'./bench.sh bench0.config | tee -a {log_file}')
 

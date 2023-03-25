@@ -285,6 +285,8 @@ verify_config([{Tag, Val} | T], C) ->
             verify_config(T, C#config{statistics_detail = Val});
         statistics_detail when Val == debug2 ->
             verify_config(T, C#config{statistics_detail = Val});
+        statistics_detail when Val == debug3 ->
+            verify_config(T, C#config{statistics_detail = Val});
         statistics_detail when Val == normal ->
             verify_config(T, C#config{statistics_detail = Val});
         table_nodes when is_list(Val) ->

@@ -34,6 +34,15 @@
 %% Internal
 -export([monitor_init/2, generator_init/2, worker_init/1]).
 
+-record(prev_commits, {t1 = 0, t2 = 0, t3 = 0, t4 = 0, t5 = 0, ping = 0}).
+
+-type workload() :: t1 | t2 | t3 | t4 | t5 | ping.
+
+-record(tps,
+        {t1 = [], t2 = [], t3 = [], t4 = [], t5 = [], ping = [], prev_commits = #prev_commits{}}).
+
+-type tps() :: #tps{}.
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% The traffic generator
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -145,6 +154,37 @@ multicall(Pids, Message) ->
         end,
     lists:map(Collect, PidRefs).
 
+periodic_stats_watcher({table, Tab} = Counters) ->
+    receive
+        tp_change ->
+            NCs = ets:match(Tab, {{'$1', n_commits, '$2'}, '$3'}),
+            lists:foreach(fun([Type, Node, NC]) ->
+                             [{{Type, tps, Node}, TPS = #tps{}}] =
+                                 ets:lookup(Tab, {Type, tps, Node}),
+                             NewTPS = update_tps(Type, TPS, NC),
+                             ets:insert(Tab, {{Type, tps, Node}, NewTPS})
+                          end,
+                          NCs),
+            erlang:send_after(1000, self(), tp_change),
+            periodic_stats_watcher(Counters)
+    end.
+
+-spec update_tps(workload(), tps(), non_neg_integer()) -> tps().
+update_tps(t1, TPS = #tps{t1 = T1, prev_commits = PC = #prev_commits{t1 = PT1}}, NC) ->
+    TPS#tps{t1 = T1 ++ [NC - PT1], prev_commits = PC#prev_commits{t1 = NC}};
+update_tps(t2, TPS = #tps{t2 = T2, prev_commits = PC = #prev_commits{t2 = PT2}}, NC) ->
+    TPS#tps{t2 = T2 ++ [NC - PT2], prev_commits = PC#prev_commits{t2 = NC}};
+update_tps(t3, TPS = #tps{t3 = T3, prev_commits = PC = #prev_commits{t3 = PT3}}, NC) ->
+    TPS#tps{t3 = T3 ++ [NC - PT3], prev_commits = PC#prev_commits{t3 = NC}};
+update_tps(t4, TPS = #tps{t4 = T4, prev_commits = PC = #prev_commits{t4 = PT4}}, NC) ->
+    TPS#tps{t4 = T4 ++ [NC - PT4], prev_commits = PC#prev_commits{t4 = NC}};
+update_tps(t5, TPS = #tps{t5 = T5, prev_commits = PC = #prev_commits{t5 = PT5}}, NC) ->
+    TPS#tps{t5 = T5 ++ [NC - PT5], prev_commits = PC#prev_commits{t5 = NC}};
+update_tps(ping,
+           TPS = #tps{ping = Ping, prev_commits = PC = #prev_commits{ping = PPing}},
+           NC) ->
+    TPS#tps{ping = Ping ++ [NC - PPing], prev_commits = PC#prev_commits{ping = NC}}.
+
 %% Initialize a traffic generator
 generator_init(Monitor, C) ->
     process_flag(trap_exit, true),
@@ -153,6 +193,13 @@ generator_init(Monitor, C) ->
     rand:seed(exsplus),
     Counters = reset_counters(C, C#config.statistics_detail),
     SessionTab = ets:new(bench_sessions, [public, {keypos, 1}]),
+    case C#config.statistics_detail of
+        debug3 ->
+            Pid = spawn_link(fun() -> periodic_stats_watcher(Counters) end),
+            Pid ! tp_change;
+        _ ->
+            ok
+    end,
     generator_loop(Monitor, C, SessionTab, Counters).
 
 %% Main loop for traffic generator
@@ -277,7 +324,15 @@ get_counters(_C, {NM, NC, NA, NB}) ->
     [{{Trans, n_micros, Node}, NM},
      {{Trans, n_commits, Node}, NC},
      {{Trans, n_aborts, Node}, NA},
-     {{Trans, n_branches_executed, Node}, NB}].
+     {{Trans, n_branches_executed, Node}, NB}];
+get_counters(_C, {NM, NC, NA, NB, TPS}) ->
+    Trans = any,
+    Node = somewhere,
+    [{{Trans, n_micros, Node}, NM},
+     {{Trans, n_commits, Node}, NC},
+     {{Trans, n_aborts, Node}, NA},
+     {{Trans, n_branches_executed, Node}, NB},
+     {{Trans, tps, Node}, TPS}].
 
 % Clear all counters
 reset_counters(_C, normal) ->
@@ -290,12 +345,18 @@ reset_counters(C, debug) ->
 reset_counters(C, debug2) ->
     CounterTab = ets:new(bench_pending, [public, {keypos, 1}]),
     reset_counters(C, {table, CounterTab});
+reset_counters(C, debug3) ->
+    CounterTab = ets:new(bench_pending, [public, {keypos, 1}]),
+    reset_counters(C, {table, CounterTab});
 reset_counters(C, {table, Tab} = Counters) ->
     Names = [n_micros, n_commits, n_aborts, n_branches_executed],
+    AddNames = [tps],
     Nodes = C#config.generator_nodes ++ C#config.table_nodes,
     TransTypes = [t1, t2, t3, t4, t5, ping],
     [ets:insert(Tab, {{Trans, Name, Node}, 0})
      || Name <- Names, Node <- Nodes, Trans <- TransTypes],
+    [ets:insert(Tab, {{Trans, Name, Node}, #tps{}})
+     || Name <- AddNames, Node <- Nodes, Trans <- TransTypes],
     Counters.
 
 %% Determine the outcome of a transaction and increment the counters
@@ -713,27 +774,29 @@ pick_node(Suffix, C, Nodes) ->
     lists:nth(N, Ordered).
 
 display_statistics(Stats, C) ->
-    io:format("Stats: ~p~n", [Stats]),
     GoodStats = [{node(GenPid), GenStats} || {GenPid, GenStats} <- Stats, is_list(GenStats)],
     FlatStats =
         [{Type, Name, EvalNode, GenNode, Count}
          || {GenNode, GenStats} <- GoodStats, {{Type, Name, EvalNode}, Count} <- GenStats],
     TotalStats = calc_stats_per_tag(lists:keysort(2, FlatStats), 2, []),
-    io:format("Total statistics: ~p~n", [TotalStats]),
-    {value, {n_aborts, 0, NA, 0, 0}} =
-        lists:keysearch(n_aborts, 1, TotalStats ++ [{n_aborts, 0, 0, 0, 0}]),
-    {value, {n_commits, NC, 0, 0, 0}} =
-        lists:keysearch(n_commits, 1, TotalStats ++ [{n_commits, 0, 0, 0, 0}]),
-    {value, {n_branches_executed, 0, 0, _NB, 0}} =
+    ?d("Total statistics: ~p~n", [TotalStats]),
+    {value, {n_aborts, 0, NA, 0, 0, []}} =
+        lists:keysearch(n_aborts, 1, TotalStats ++ [{n_aborts, 0, 0, 0, 0, []}]),
+    {value, {n_commits, NC, 0, 0, 0, []}} =
+        lists:keysearch(n_commits, 1, TotalStats ++ [{n_commits, 0, 0, 0, 0, []}]),
+    {value, {n_branches_executed, 0, 0, _NB, 0, []}} =
         lists:keysearch(n_branches_executed,
                         1,
-                        TotalStats ++ [{n_branches_executed, 0, 0, 0, 0}]),
-    {value, {n_micros, 0, 0, 0, AccMicros}} =
-        lists:keysearch(n_micros, 1, TotalStats ++ [{n_micros, 0, 0, 0, 0}]),
+                        TotalStats ++ [{n_branches_executed, 0, 0, 0, 0, []}]),
+    {value, {n_micros, 0, 0, 0, AccMicros, []}} =
+        lists:keysearch(n_micros, 1, TotalStats ++ [{n_micros, 0, 0, 0, 0, []}]),
+    {value, {tps, 0, 0, 0, 0, TPS}} =
+        lists:keysearch(tps, 1, TotalStats ++ [{tps, 0, 0, 0, 0, []}]),
     NT = NA + NC,
     NG = length(GoodStats),
     NTN = length(C#config.table_nodes),
     WallMicros = C#config.generator_duration * 1000 * NG,
+    io:format("wall time: ~p accmicros ~p~n", [WallMicros, AccMicros]),
     Overhead = catch (WallMicros - AccMicros) / WallMicros,
     ?d("~n", []),
     ?d("Benchmark result...~n", []),
@@ -748,6 +811,7 @@ display_statistics(Stats, C) ->
                 transaction
         end,
     ?d("    ~p ~ps per second (TPS).~n", [catch NT * 1000000 * NG div AccMicros, Kind]),
+    ?d("    ~p ~p commits per second against time~n", [TPS, Kind]),
     ?d("    ~p ~pPS per table node.~n",
        [catch NT * 1000000 * NG div (AccMicros * NTN), Kind]),
     ?d("    ~p micro seconds in average per ~p, including latency.~n",
@@ -794,18 +858,18 @@ display_statistics(Stats, C) ->
            io:format("~n", [])
     end.
 
-display_calc_stats(Prefix, [{_Tag, 0, 0, 0, 0} | Rest], NT, Micros) ->
+display_calc_stats(Prefix, [{_Tag, 0, 0, 0, 0, []} | Rest], NT, Micros) ->
     display_calc_stats(Prefix, Rest, NT, Micros);
-display_calc_stats(Prefix, [{Tag, NC, NA, _NB, NM} | Rest], NT, Micros) ->
+display_calc_stats(Prefix, [{Tag, NC, NA, _NB, NM, _NCS} | Rest], NT, Micros) ->
     ?d("~s~s n=~s%\ttime=~s%~n",
        [Prefix, left(Tag), percent(NC + NA, NT), percent(NM, Micros)]),
     display_calc_stats(Prefix, Rest, NT, Micros);
 display_calc_stats(_, [], _, _) ->
     ok.
 
-display_type_stats(Prefix, [{_Tag, 0, 0, 0, 0} | Rest], NT, Micros) ->
+display_type_stats(Prefix, [{_Tag, 0, 0, 0, 0, _NCS} | Rest], NT, Micros) ->
     display_type_stats(Prefix, Rest, NT, Micros);
-display_type_stats(Prefix, [{Tag, NC, NA, NB, NM} | Rest], NT, Micros) ->
+display_type_stats(Prefix, [{Tag, NC, NA, NB, NM, NCS} | Rest], NT, Micros) ->
     ?d("~s~s n=~s%\ttime=~s%\tavg micros=~p~n",
        [Prefix, left(Tag), percent(NC + NA, NT), percent(NM, Micros), catch NM div (NC + NA)]),
     case NA /= 0 of
@@ -840,27 +904,68 @@ calc_stats_per_tag([], _Pos, Acc) ->
     lists:sort(Acc);
 calc_stats_per_tag([Tuple | _] = FlatStats, Pos, Acc) when size(Tuple) == 5 ->
     Tag = element(Pos, Tuple),
-    do_calc_stats_per_tag(FlatStats, Pos, {Tag, 0, 0, 0, 0}, Acc).
+    do_calc_stats_per_tag(FlatStats, Pos, {Tag, 0, 0, 0, 0, []}, Acc).
 
-do_calc_stats_per_tag([Tuple | Rest], Pos, {Tag, NC, NA, NB, NM}, Acc)
+do_calc_stats_per_tag([Tuple | Rest], Pos, {Tag, NC, NA, NB, NM, NTPS}, Acc)
     when element(Pos, Tuple) == Tag ->
     Val = element(5, Tuple),
     case element(2, Tuple) of
         n_commits ->
-            do_calc_stats_per_tag(Rest, Pos, {Tag, NC + Val, NA, NB, NM}, Acc);
+            do_calc_stats_per_tag(Rest, Pos, {Tag, NC + Val, NA, NB, NM, []}, Acc);
         n_aborts ->
-            do_calc_stats_per_tag(Rest, Pos, {Tag, NC, NA + Val, NB, NM}, Acc);
+            do_calc_stats_per_tag(Rest, Pos, {Tag, NC, NA + Val, NB, NM, []}, Acc);
         n_branches_executed ->
-            do_calc_stats_per_tag(Rest, Pos, {Tag, NC, NA, NB + Val, NM}, Acc);
+            do_calc_stats_per_tag(Rest, Pos, {Tag, NC, NA, NB + Val, NM, []}, Acc);
         n_micros ->
-            do_calc_stats_per_tag(Rest, Pos, {Tag, NC, NA, NB, NM + Val}, Acc)
+            do_calc_stats_per_tag(Rest, Pos, {Tag, NC, NA, NB, NM + Val, []}, Acc);
+        tps ->
+            Type = element(1, Tuple),
+            do_calc_stats_per_tag(Rest, Pos, {Tag, NC, NA, NB, NM, sum_tps(Type, Val, NTPS)}, Acc)
     end;
 do_calc_stats_per_tag(GenStats, Pos, CalcStats, Acc) ->
     calc_stats_per_tag(GenStats, Pos, [CalcStats | Acc]).
 
-display_trans_stats(Prefix, [{_Tag, 0, 0, 0, 0} | Rest], NT, Micros, NG) ->
+-spec sum_tps(workload(), tps(), [integer()]) -> [integer()].
+sum_tps(t1, TPS = #tps{t1 = T1}, []) when length(T1) > 0 ->
+    NTPS = [0 || _ <- T1],
+    sum_tps(t1, TPS, NTPS);
+sum_tps(t2, TPS = #tps{t2 = T2}, []) when length(T2) > 0 ->
+    NTPS = [0 || _ <- T2],
+    sum_tps(t2, TPS, NTPS);
+sum_tps(t3, TPS = #tps{t3 = T3}, []) when length(T3) > 0 ->
+    NTPS = [0 || _ <- T3],
+    sum_tps(t3, TPS, NTPS);
+sum_tps(t4, TPS = #tps{t4 = T4}, []) when length(T4) > 0 ->
+    NTPS = [0 || _ <- T4],
+    sum_tps(t4, TPS, NTPS);
+sum_tps(t5, TPS = #tps{t5 = T5}, []) when length(T5) > 0 ->
+    NTPS = [0 || _ <- T5],
+    sum_tps(t5, TPS, NTPS);
+sum_tps(ping, TPS = #tps{ping = Ping}, []) when length(Ping) > 0 ->
+    NTPS = [0 || _ <- Ping],
+    sum_tps(ping, TPS, NTPS);
+sum_tps(t1, #tps{t1 = T}, NTPS) ->
+    Adder2 = fun(X, Y) -> X + Y end,
+    lists:zipwith(Adder2, T, NTPS);
+sum_tps(t2, #tps{t2 = T}, NTPS) ->
+    Adder2 = fun(X, Y) -> X + Y end,
+    lists:zipwith(Adder2, T, NTPS);
+sum_tps(t3, #tps{t3 = T}, NTPS) ->
+    Adder2 = fun(X, Y) -> X + Y end,
+    lists:zipwith(Adder2, T, NTPS);
+sum_tps(t4, #tps{t4 = T}, NTPS) ->
+    Adder2 = fun(X, Y) -> X + Y end,
+    lists:zipwith(Adder2, T, NTPS);
+sum_tps(t5, #tps{t5 = T}, NTPS) ->
+    Adder2 = fun(X, Y) -> X + Y end,
+    lists:zipwith(Adder2, T, NTPS);
+sum_tps(ping, #tps{ping = Ping}, NTPS) ->
+    Adder2 = fun(X, Y) -> X + Y end,
+    lists:zipwith(Adder2, Ping, NTPS).
+
+display_trans_stats(Prefix, [{_Tag, 0, 0, 0, 0, []} | Rest], NT, Micros, NG) ->
     display_trans_stats(Prefix, Rest, NT, Micros, NG);
-display_trans_stats(Prefix, [{Tag, NC, NA, NB, NM} | Rest], NT, Micros, NG) ->
+display_trans_stats(Prefix, [{Tag, NC, NA, NB, NM, NCS} | Rest], NT, Micros, NG) ->
     Common =
         fun(Name) ->
            Sec = NM / (1000000 * NG),
