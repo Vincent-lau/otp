@@ -136,7 +136,7 @@ start_all(Args) ->
     erlang:set_cookie(node(), C#config.cookie),
     ?d("Starting Erlang nodes...~n", []),
     ?d("~n", []),
-    SlaveNodes = do_start_all(Nodes, [], C#config.cookie),
+    SlaveNodes = do_start_all(C, Nodes, [], C#config.cookie),
     Extra = [{extra_db_nodes, Nodes}],
     ?d("~n", []),
     ?d("Starting Mnesia...", []),
@@ -155,31 +155,27 @@ start_all(Args) ->
             exit({mnesia_start, Bad})
     end.
 
-
 set_debug_level_all(C, Debug) ->
     Nodes =
         [node() | ((C#config.table_nodes -- C#config.generator_nodes) ++ C#config.generator_nodes)
                   -- [node()]],
     rpc:multicall(Nodes, mnesia, set_debug_level, [Debug]).
 
-
-do_start_all([Node | Nodes], Acc, Cookie) when is_atom(Node) ->
+do_start_all(C, [Node | Nodes], Acc, Cookie) when is_atom(Node) ->
     case string:tokens(atom_to_list(Node), [$@]) of
         [Name, Host] ->
-            Args= lists:concat(["-setcookie ", Cookie]) 
-            ++ " -pa "
-            ++ code:which(quantile_estimator),
+            Args = lists:concat(["-setcookie ", Cookie]),
             ?d("    ~s", [left(Node)]),
             case slave:start_link(Host, Name, Args) of
                 {ok, Node} ->
-                    load_modules(Node),
+                    load_modules(C, Node),
                     rpc:call(Node, ?MODULE, bind_schedulers, []),
                     io:format(" started~n", []),
-                    do_start_all(Nodes, [Node | Acc], Cookie);
+                    do_start_all(C, Nodes, [Node | Acc], Cookie);
                 {error, {already_running, Node}} ->
                     rpc:call(Node, ?MODULE, bind_schedulers, []),
                     io:format(" already started~n", []),
-                    do_start_all(Nodes, Acc, Cookie);
+                    do_start_all(C, Nodes, Acc, Cookie);
                 {error, Reason} ->
                     io:format(" FAILED:~p~n", [Reason]),
                     stop_slave_nodes(Acc),
@@ -190,17 +186,25 @@ do_start_all([Node | Nodes], Acc, Cookie) when is_atom(Node) ->
             stop_slave_nodes(Acc),
             exit({bad_node_name, Node})
     end;
-do_start_all([], StartedNodes, _Cookie) ->
+do_start_all(_C, [], StartedNodes, _Cookie) ->
     StartedNodes.
 
-load_modules(Node) ->
+load_modules(C, Node) ->
     Fun = fun(Mod) ->
              case code:get_object_code(Mod) of
                  {_Module, Bin, Fname} -> rpc:call(Node, code, load_binary, [Mod, Fname, Bin]);
                  Other -> Other
              end
           end,
-    lists:foreach(Fun, [bench, bench_generate, bench_populate, bench_trans, quantile_estimator]).
+    Mods = [bench, bench_generate, bench_populate, bench_trans],
+    Mods2 =
+        case C#config.statistics_detail of
+            debug_latency ->
+                [quantile_estimator | Mods];
+            _ ->
+                Mods
+        end,
+    lists:foreach(Fun, Mods2).
 
 stop_slave_nodes([]) ->
     ok;

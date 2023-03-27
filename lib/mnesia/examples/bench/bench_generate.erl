@@ -360,13 +360,15 @@ reset_counters(C, {table, Tab} = Counters) ->
     [ets:insert(Tab, {{Trans, Name, Node}, 0})
      || Name <- Names, Node <- Nodes, Trans <- TransTypes],
     [ets:insert(Tab, {{Trans, tps, Node}, #tps{}}) || Node <- Nodes, Trans <- TransTypes],
-    QE = init_quantile_estimator(),
+    QE = init_quantile_estimator(C),
     [ets:insert(Tab, {{Trans, latency, Node}, QE}) || Node <- Nodes, Trans <- TransTypes],
     Counters.
 
-init_quantile_estimator() ->
+init_quantile_estimator(C) when C#config.statistics_detail =:= debug_latency ->
     IV = quantile_estimator:f_targeted([{0.99, 0.005}]),
-    quantile_estimator:new(IV).
+    quantile_estimator:new(IV);
+init_quantile_estimator(_C) ->
+    0.
 
 %% Determine the outcome of a transaction and increment the counters
 post_eval(Monitor,
@@ -486,6 +488,16 @@ gen_traffic(C, SessionTab)
             gen_async4(C, SessionTab, Activity);
         Rand when Rand > 85, Rand =< 100 ->
             gen_async5(C, SessionTab, Activity)
+    end;
+gen_traffic(C, SessionTab)
+    when C#config.activity =:= transaction
+         andalso C#config.generator_profile =:= rw_ratio ->
+    ReadPct = C#config.rw_ratio * 100,
+    case rand:uniform(100) of
+        Rand when Rand > 0, Rand =< ReadPct ->
+            gen_t2(C, SessionTab);
+        Rand when Rand > ReadPct ->
+            gen_t1(C, SessionTab)
     end;
 gen_traffic(C, SessionTab)
     when (C#config.activity =:= async_ec orelse C#config.activity =:= async_dirty)
@@ -984,6 +996,9 @@ make_equal_length(T, NPTS) when length(NPTS) =/= length(T) ->
             {T1, lists:nthtail(N, NPTS1)}
     end.
 
+
+latency99(_Type, 0, Lats) ->
+    Lats;
 latency99(_Type, QE, Lats) ->
     case quantile_estimator:inserts_since_compression(QE) of
         0 ->
