@@ -1,4 +1,4 @@
-ERL_TOP = /home/vincent/proj/otp
+ERL_TOP = ~/proj/otp
 
 all:
 	$(ERL_TOP)/bin/erl -make
