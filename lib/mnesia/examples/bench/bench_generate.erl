@@ -26,6 +26,7 @@
 -module(bench_generate).
 
 -author('hakan@cslab.ericsson.se').
+-author('sl955@cam.ac.uk').
 
 -include("bench.hrl").
 
@@ -195,8 +196,8 @@ generator_init(Monitor, C) ->
     SessionTab = ets:new(bench_sessions, [public, {keypos, 1}]),
     case C#config.statistics_detail of
         debug3 ->
-            Pid = spawn_link(fun() -> periodic_stats_watcher(Counters) end),
-            Pid ! tp_change;
+            WatcherPid = spawn_link(fun() -> periodic_stats_watcher(Counters) end),
+            erlang:send_after(1000, WatcherPid, tp_change);
         _ ->
             ok
     end,
@@ -256,7 +257,7 @@ generator_loop(Monitor, C, SessionTab, Counters) ->
 
 %% Perform a transaction on a node near the data
 call_worker([Node | _], async_ec, Fun, Wlock, _Mod) when Node =:= node() ->
-    {Node, mnesia:activity(async_ec, Fun, [Wlock], mnesia_ec)};
+    {Node, catch mnesia:activity(async_ec, Fun, [Wlock], mnesia_ec)};
 call_worker([Node | _], Activity, Fun, Wlock, Mod) when Node =:= node() ->
     {Node, catch mnesia:activity(Activity, Fun, [Wlock], Mod)};
 call_worker([Node | _] = Nodes, Activity, Fun, Wlock, Mod) ->
@@ -325,14 +326,15 @@ get_counters(_C, {NM, NC, NA, NB}) ->
      {{Trans, n_commits, Node}, NC},
      {{Trans, n_aborts, Node}, NA},
      {{Trans, n_branches_executed, Node}, NB}];
-get_counters(_C, {NM, NC, NA, NB, TPS}) ->
+get_counters(_C, {NM, NC, NA, NB, TPS, Latencies}) ->
     Trans = any,
     Node = somewhere,
     [{{Trans, n_micros, Node}, NM},
      {{Trans, n_commits, Node}, NC},
      {{Trans, n_aborts, Node}, NA},
      {{Trans, n_branches_executed, Node}, NB},
-     {{Trans, tps, Node}, TPS}].
+     {{Trans, tps, Node}, TPS},
+     {{Trans, latency, Node}, Latencies}].
 
 % Clear all counters
 reset_counters(_C, normal) ->
@@ -345,19 +347,26 @@ reset_counters(C, debug) ->
 reset_counters(C, debug2) ->
     CounterTab = ets:new(bench_pending, [public, {keypos, 1}]),
     reset_counters(C, {table, CounterTab});
-reset_counters(C, debug3) ->
+reset_counters(C, debug_tp) ->
+    CounterTab = ets:new(bench_pending, [public, {keypos, 1}]),
+    reset_counters(C, {table, CounterTab});
+reset_counters(C, debug_latency) ->
     CounterTab = ets:new(bench_pending, [public, {keypos, 1}]),
     reset_counters(C, {table, CounterTab});
 reset_counters(C, {table, Tab} = Counters) ->
     Names = [n_micros, n_commits, n_aborts, n_branches_executed],
-    AddNames = [tps],
     Nodes = C#config.generator_nodes ++ C#config.table_nodes,
     TransTypes = [t1, t2, t3, t4, t5, ping],
     [ets:insert(Tab, {{Trans, Name, Node}, 0})
      || Name <- Names, Node <- Nodes, Trans <- TransTypes],
-    [ets:insert(Tab, {{Trans, Name, Node}, #tps{}})
-     || Name <- AddNames, Node <- Nodes, Trans <- TransTypes],
+    [ets:insert(Tab, {{Trans, tps, Node}, #tps{}}) || Node <- Nodes, Trans <- TransTypes],
+    QE = init_quantile_estimator(),
+    [ets:insert(Tab, {{Trans, latency, Node}, QE}) || Node <- Nodes, Trans <- TransTypes],
     Counters.
+
+init_quantile_estimator() ->
+    IV = quantile_estimator:f_targeted([{0.99, 0.005}]),
+    quantile_estimator:new(IV).
 
 %% Determine the outcome of a transaction and increment the counters
 post_eval(Monitor,
@@ -372,6 +381,7 @@ post_eval(Monitor,
         {do_commit, BranchExecuted, _} ->
             incr(Tab, {Name, n_micros, Node}, Elapsed),
             incr(Tab, {Name, n_commits, Node}, 1),
+            add_latency(C, Tab, {Name, latency, Node}, Elapsed),
             case BranchExecuted of
                 true ->
                     incr(Tab, {Name, n_branches_executed, Node}, 1),
@@ -390,6 +400,10 @@ post_eval(Monitor,
                 false ->
                     generator_loop(Monitor, C, SessionTab, Counters)
             end;
+        {'EXIT', {aborted, {busy_read, _, _}}} ->
+            incr(Tab, {Name, n_micros, Node}, Elapsed),
+            incr(Tab, {Name, n_aborts, Node}, 1),
+            generator_loop(Monitor, C, SessionTab, Counters);
         _ ->
             ?d("Failed(~p): ~p~n", [Node, Res]),
             incr(Tab, {Name, n_micros, Node}, Elapsed),
@@ -424,6 +438,15 @@ post_eval(Monitor,
             ?d("Failed: ~p~n", [Res]),
             generator_loop(Monitor, C, SessionTab, {NM + Elapsed, NC, NA + 1, NB})
     end.
+
+add_latency(C, Tab, Counter, Elapsed) when C#config.statistics_detail =:= debug_latency ->
+    case ets:lookup(Tab, Counter) of
+        [{Counter, QE1}] ->
+            QE2 = quantile_estimator:insert(Elapsed, QE1),
+            ets:insert(Tab, {Counter, QE2})
+    end;
+add_latency(_C, _Tab, _Counter, _Elapsed) ->
+    ignore.
 
 incr(Tab, Counter, Incr) ->
     ets:update_counter(Tab, Counter, Incr).
@@ -463,6 +486,17 @@ gen_traffic(C, SessionTab)
             gen_async4(C, SessionTab, Activity);
         Rand when Rand > 85, Rand =< 100 ->
             gen_async5(C, SessionTab, Activity)
+    end;
+gen_traffic(C, SessionTab)
+    when (C#config.activity =:= async_ec orelse C#config.activity =:= async_dirty)
+         andalso C#config.generator_profile =:= rw_ratio ->
+    Activity = C#config.activity,
+    ReadPct = C#config.rw_ratio * 100,
+    case rand:uniform(100) of
+        Rand when Rand > 0, Rand =< ReadPct ->
+            gen_async2(C, SessionTab, Activity);
+        Rand when Rand > ReadPct ->
+            gen_async1(C, SessionTab, Activity)
     end;
 gen_traffic(C, SessionTab) when C#config.activity =:= transaction ->
     case C#config.generator_profile of
@@ -780,18 +814,20 @@ display_statistics(Stats, C) ->
          || {GenNode, GenStats} <- GoodStats, {{Type, Name, EvalNode}, Count} <- GenStats],
     TotalStats = calc_stats_per_tag(lists:keysort(2, FlatStats), 2, []),
     ?d("Total statistics: ~p~n", [TotalStats]),
-    {value, {n_aborts, 0, NA, 0, 0, []}} =
-        lists:keysearch(n_aborts, 1, TotalStats ++ [{n_aborts, 0, 0, 0, 0, []}]),
-    {value, {n_commits, NC, 0, 0, 0, []}} =
-        lists:keysearch(n_commits, 1, TotalStats ++ [{n_commits, 0, 0, 0, 0, []}]),
-    {value, {n_branches_executed, 0, 0, _NB, 0, []}} =
+    {value, {n_aborts, 0, NA, 0, 0, [], []}} =
+        lists:keysearch(n_aborts, 1, TotalStats ++ [{n_aborts, 0, 0, 0, 0, [], []}]),
+    {value, {n_commits, NC, 0, 0, 0, [], []}} =
+        lists:keysearch(n_commits, 1, TotalStats ++ [{n_commits, 0, 0, 0, 0, [], []}]),
+    {value, {n_branches_executed, 0, 0, _NB, 0, [], []}} =
         lists:keysearch(n_branches_executed,
                         1,
-                        TotalStats ++ [{n_branches_executed, 0, 0, 0, 0, []}]),
-    {value, {n_micros, 0, 0, 0, AccMicros, []}} =
-        lists:keysearch(n_micros, 1, TotalStats ++ [{n_micros, 0, 0, 0, 0, []}]),
-    {value, {tps, 0, 0, 0, 0, TPS}} =
-        lists:keysearch(tps, 1, TotalStats ++ [{tps, 0, 0, 0, 0, []}]),
+                        TotalStats ++ [{n_branches_executed, 0, 0, 0, 0, [], []}]),
+    {value, {n_micros, 0, 0, 0, AccMicros, [], []}} =
+        lists:keysearch(n_micros, 1, TotalStats ++ [{n_micros, 0, 0, 0, 0, [], []}]),
+    {value, {tps, 0, 0, 0, 0, TPS, []}} =
+        lists:keysearch(tps, 1, TotalStats ++ [{tps, 0, 0, 0, 0, [], []}]),
+    {value, {latency, 0, 0, 0, 0, [], LATS}} =
+        lists:keysearch(latency, 1, TotalStats ++ [{latency, 0, 0, 0, 0, [], []}]),
     NT = NA + NC,
     NG = length(GoodStats),
     NTN = length(C#config.table_nodes),
@@ -816,6 +852,7 @@ display_statistics(Stats, C) ->
        [catch NT * 1000000 * NG div (AccMicros * NTN), Kind]),
     ?d("    ~p micro seconds in average per ~p, including latency.~n",
        [Kind, catch AccMicros div NT]),
+    ?d("    ~p 99th percentile latency ~p.~n", [Kind, LATS]),
     ?d("    ~p ~p. ~f% generator overhead.~n", [NT, Kind, Overhead * 100]),
 
     TypeStats = calc_stats_per_tag(lists:keysort(1, FlatStats), 1, []),
@@ -858,18 +895,18 @@ display_statistics(Stats, C) ->
            io:format("~n", [])
     end.
 
-display_calc_stats(Prefix, [{_Tag, 0, 0, 0, 0, []} | Rest], NT, Micros) ->
+display_calc_stats(Prefix, [{_Tag, 0, 0, 0, 0, [], []} | Rest], NT, Micros) ->
     display_calc_stats(Prefix, Rest, NT, Micros);
-display_calc_stats(Prefix, [{Tag, NC, NA, _NB, NM, _NCS} | Rest], NT, Micros) ->
+display_calc_stats(Prefix, [{Tag, NC, NA, _NB, NM, _NCS, _Lats} | Rest], NT, Micros) ->
     ?d("~s~s n=~s%\ttime=~s%~n",
        [Prefix, left(Tag), percent(NC + NA, NT), percent(NM, Micros)]),
     display_calc_stats(Prefix, Rest, NT, Micros);
 display_calc_stats(_, [], _, _) ->
     ok.
 
-display_type_stats(Prefix, [{_Tag, 0, 0, 0, 0, _NCS} | Rest], NT, Micros) ->
+display_type_stats(Prefix, [{_Tag, 0, 0, 0, 0, _NCS, _Lats} | Rest], NT, Micros) ->
     display_type_stats(Prefix, Rest, NT, Micros);
-display_type_stats(Prefix, [{Tag, NC, NA, NB, NM, NCS} | Rest], NT, Micros) ->
+display_type_stats(Prefix, [{Tag, NC, NA, NB, NM, _NCS, _Lats} | Rest], NT, Micros) ->
     ?d("~s~s n=~s%\ttime=~s%\tavg micros=~p~n",
        [Prefix, left(Tag), percent(NC + NA, NT), percent(NM, Micros), catch NM div (NC + NA)]),
     case NA /= 0 of
@@ -904,64 +941,118 @@ calc_stats_per_tag([], _Pos, Acc) ->
     lists:sort(Acc);
 calc_stats_per_tag([Tuple | _] = FlatStats, Pos, Acc) when size(Tuple) == 5 ->
     Tag = element(Pos, Tuple),
-    do_calc_stats_per_tag(FlatStats, Pos, {Tag, 0, 0, 0, 0, []}, Acc).
+    do_calc_stats_per_tag(FlatStats, Pos, {Tag, 0, 0, 0, 0, [], []}, Acc).
 
-do_calc_stats_per_tag([Tuple | Rest], Pos, {Tag, NC, NA, NB, NM, NTPS}, Acc)
+do_calc_stats_per_tag([Tuple | Rest], Pos, {Tag, NC, NA, NB, NM, NTPS, Lats}, Acc)
     when element(Pos, Tuple) == Tag ->
     Val = element(5, Tuple),
     case element(2, Tuple) of
         n_commits ->
-            do_calc_stats_per_tag(Rest, Pos, {Tag, NC + Val, NA, NB, NM, []}, Acc);
+            do_calc_stats_per_tag(Rest, Pos, {Tag, NC + Val, NA, NB, NM, [], Lats}, Acc);
         n_aborts ->
-            do_calc_stats_per_tag(Rest, Pos, {Tag, NC, NA + Val, NB, NM, []}, Acc);
+            do_calc_stats_per_tag(Rest, Pos, {Tag, NC, NA + Val, NB, NM, [], Lats}, Acc);
         n_branches_executed ->
-            do_calc_stats_per_tag(Rest, Pos, {Tag, NC, NA, NB + Val, NM, []}, Acc);
+            do_calc_stats_per_tag(Rest, Pos, {Tag, NC, NA, NB + Val, NM, [], Lats}, Acc);
         n_micros ->
-            do_calc_stats_per_tag(Rest, Pos, {Tag, NC, NA, NB, NM + Val, []}, Acc);
+            do_calc_stats_per_tag(Rest, Pos, {Tag, NC, NA, NB, NM + Val, [], Lats}, Acc);
         tps ->
             Type = element(1, Tuple),
-            do_calc_stats_per_tag(Rest, Pos, {Tag, NC, NA, NB, NM, sum_tps(Type, Val, NTPS)}, Acc)
+            do_calc_stats_per_tag(Rest,
+                                  Pos,
+                                  {Tag, NC, NA, NB, NM, sum_tps(Type, Val, NTPS), Lats},
+                                  Acc);
+        latency ->
+            Type = element(1, Tuple),
+            do_calc_stats_per_tag(Rest,
+                                  Pos,
+                                  {Tag, NC, NA, NB, NM, [], latency99(Type, Val, Lats)},
+                                  Acc)
     end;
 do_calc_stats_per_tag(GenStats, Pos, CalcStats, Acc) ->
     calc_stats_per_tag(GenStats, Pos, [CalcStats | Acc]).
 
+-spec make_equal_length([integer()], [integer()]) -> {[integer()], [integer()]}.
+make_equal_length(T, NPTS) when length(NPTS) =/= length(T) ->
+    case {T, NPTS} of
+        {T1, []} ->
+            {T1, [0 || _ <- T]};
+        {T1, NPTS1} when length(T1) > length(NPTS1) ->
+            N = length(T1) - length(NPTS1),
+            {lists:nthtail(N, T1), NPTS1};
+        {T1, NPTS1} when length(T1) < length(NPTS1) ->
+            N = length(NPTS1) - length(T1),
+            {T1, lists:nthtail(N, NPTS1)}
+    end.
+
+latency99(_Type, QE, Lats) ->
+    case quantile_estimator:inserts_since_compression(QE) of
+        0 ->
+            Lats;
+        _ ->
+            [quantile_estimator:quantile(0.99, QE) | Lats]
+    end.
+
 -spec sum_tps(workload(), tps(), [integer()]) -> [integer()].
-sum_tps(t1, TPS = #tps{t1 = T1}, []) when length(T1) > 0 ->
-    NTPS = [0 || _ <- T1],
-    sum_tps(t1, TPS, NTPS);
-sum_tps(t2, TPS = #tps{t2 = T2}, []) when length(T2) > 0 ->
-    NTPS = [0 || _ <- T2],
-    sum_tps(t2, TPS, NTPS);
-sum_tps(t3, TPS = #tps{t3 = T3}, []) when length(T3) > 0 ->
-    NTPS = [0 || _ <- T3],
-    sum_tps(t3, TPS, NTPS);
-sum_tps(t4, TPS = #tps{t4 = T4}, []) when length(T4) > 0 ->
-    NTPS = [0 || _ <- T4],
-    sum_tps(t4, TPS, NTPS);
-sum_tps(t5, TPS = #tps{t5 = T5}, []) when length(T5) > 0 ->
-    NTPS = [0 || _ <- T5],
-    sum_tps(t5, TPS, NTPS);
-sum_tps(ping, TPS = #tps{ping = Ping}, []) when length(Ping) > 0 ->
-    NTPS = [0 || _ <- Ping],
-    sum_tps(ping, TPS, NTPS);
 sum_tps(t1, #tps{t1 = T}, NTPS) ->
+    {T2, NTPS2} =
+        case length(T) =/= length(NTPS) of
+            true ->
+                make_equal_length(T, NTPS);
+            false ->
+                {T, NTPS}
+        end,
     Adder2 = fun(X, Y) -> X + Y end,
-    lists:zipwith(Adder2, T, NTPS);
+    lists:zipwith(Adder2, T2, NTPS2);
 sum_tps(t2, #tps{t2 = T}, NTPS) ->
+    {T2, NTPS2} =
+        case length(T) =/= length(NTPS) of
+            true ->
+                make_equal_length(T, NTPS);
+            false ->
+                {T, NTPS}
+        end,
     Adder2 = fun(X, Y) -> X + Y end,
-    lists:zipwith(Adder2, T, NTPS);
+    lists:zipwith(Adder2, T2, NTPS2);
 sum_tps(t3, #tps{t3 = T}, NTPS) ->
+    {T2, NTPS2} =
+        case length(T) =/= length(NTPS) of
+            true ->
+                make_equal_length(T, NTPS);
+            false ->
+                {T, NTPS}
+        end,
     Adder2 = fun(X, Y) -> X + Y end,
-    lists:zipwith(Adder2, T, NTPS);
+    lists:zipwith(Adder2, T2, NTPS2);
 sum_tps(t4, #tps{t4 = T}, NTPS) ->
+    {T2, NTPS2} =
+        case length(T) =/= length(NTPS) of
+            true ->
+                make_equal_length(T, NTPS);
+            false ->
+                {T, NTPS}
+        end,
     Adder2 = fun(X, Y) -> X + Y end,
-    lists:zipwith(Adder2, T, NTPS);
+    lists:zipwith(Adder2, T2, NTPS2);
 sum_tps(t5, #tps{t5 = T}, NTPS) ->
+    {T2, NTPS2} =
+        case length(T) =/= length(NTPS) of
+            true ->
+                make_equal_length(T, NTPS);
+            false ->
+                {T, NTPS}
+        end,
     Adder2 = fun(X, Y) -> X + Y end,
-    lists:zipwith(Adder2, T, NTPS);
+    lists:zipwith(Adder2, T2, NTPS2);
 sum_tps(ping, #tps{ping = Ping}, NTPS) ->
+    {Ping2, NTPS2} =
+        case length(Ping) =/= length(NTPS) of
+            true ->
+                make_equal_length(Ping, NTPS);
+            false ->
+                {Ping, NTPS}
+        end,
     Adder2 = fun(X, Y) -> X + Y end,
-    lists:zipwith(Adder2, Ping, NTPS).
+    lists:zipwith(Adder2, Ping2, NTPS2).
 
 display_trans_stats(Prefix, [{_Tag, 0, 0, 0, 0, []} | Rest], NT, Micros, NG) ->
     display_trans_stats(Prefix, Rest, NT, Micros, NG);
@@ -969,12 +1060,13 @@ display_trans_stats(Prefix, [{Tag, NC, NA, NB, NM, NCS} | Rest], NT, Micros, NG)
     Common =
         fun(Name) ->
            Sec = NM / (1000000 * NG),
-           io:format("  ~s: ~p (~p%) Time: ~p sec TPS = ~p~n",
+           io:format("  ~s: ~p (~p%) Time: ~p sec TPS = ~p~n, transactions per second~p~n",
                      [Name,
                       NC + NA,
                       round((NC + NA) * 100 / NT),
                       round(Sec),
-                      round((NC + NA) / Sec)])
+                      round((NC + NA) / Sec),
+                      NCS])
         end,
     Branch =
         fun() ->

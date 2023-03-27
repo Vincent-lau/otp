@@ -32,8 +32,8 @@
 -include("bench.hrl").
 
 -export([update_current_location/5, read_current_location/2, read_session_details/4,
-         create_session_to_server/6, delete_session_from_server/5, number_to_suffix/1,
-         number_to_key/2]).
+         create_session_to_server/6, delete_session_from_server/5,
+         number_to_suffix/1, number_to_key/2]).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% The transactions
@@ -88,10 +88,10 @@ read_session_details(Wlock, SubscrId, ServerBit, ServerId) ->
     case ExecuteBranch of
         true ->
             SessionKey = {SubscrId, ServerId},
-            Session = busy_read(session, SessionKey),
+            Session = busy_read(session, SessionKey, true),
 
             ServerKey = {ServerId, Suffix},
-            Server = busy_read(server, ServerKey),
+            Server = busy_read(server, ServerKey, true),
             Server2 = Server#server{no_of_read = Server#server.no_of_read + 1},
             mnesia:write(server, Server2, Wlock),
             {do_commit, ExecuteBranch, [Session#session.session_details]};
@@ -105,7 +105,7 @@ read_session_details(Wlock, SubscrId, ServerBit, ServerId) ->
 %% create a new session for the subscriber and server and write into subscriber,
 %% and subscriber table
 %% update the server table on number of inserts
-%% 
+%%
 %% -------------------------------------------------------------------
 
 create_session_to_server(Wlock, SubscrId, ServerBit, ServerId, Details, DoRollback) ->
@@ -130,7 +130,7 @@ create_session_to_server(Wlock, SubscrId, ServerBit, ServerId, Details, DoRollba
             mnesia:write(subscriber, Subscr2, Wlock),
 
             ServerKey = {ServerId, Suffix},
-            Server = busy_read(server, ServerKey),
+            Server = busy_read(server, ServerKey, true),
             Server2 = Server#server{no_of_insert = Server#server.no_of_insert + 1},
             mnesia:write(server, Server2, Wlock);
         false ->
@@ -166,7 +166,7 @@ delete_session_from_server(Wlock, SubscrId, ServerBit, ServerId, DoRollback) ->
             mnesia:write(subscriber, Subscr2, Wlock),
 
             ServerKey = {ServerId, Suffix},
-            Server = busy_read(server, ServerKey),
+            Server = busy_read(server, ServerKey, true),
             Server2 = Server#server{no_of_delete = Server#server.no_of_delete + 1},
             mnesia:write(server, Server2, Wlock);
         false ->
@@ -192,13 +192,22 @@ number_to_key(Id, C) when is_integer(Id) ->
             Id
     end.
 
-busy_read(Table, SubscrId) ->
-    case mnesia:read(Table, SubscrId, read) of
+busy_read(Table, Key) ->
+    busy_read(Table, Key, false).
+
+busy_read(Table, Key, ExecuteBranch) ->
+    do_busy_read(Table, Key, ExecuteBranch, 0).
+
+do_busy_read(Table, Key, ExecuteBranch, Try) when Try < 10 ->
+    case mnesia:read(Table, Key, read) of
         [] ->
-            % ?d("busy_read: retrying read of ~p:~p~n", [Table, SubscrId]),
-            busy_read(Table, SubscrId);
+            ?d("busy_read: retrying read of ~p:~p~n", [Table, Key]),
+            do_busy_read(Table, Key, ExecuteBranch, Try + 1);
         [Subscr] ->
             Subscr;
         Other when length(Other) > 1 ->
             hd(Other)
-    end.
+    end;
+do_busy_read(Table, Key, ExecuteBranch, _Try) ->
+    ?d("busy_read: aborting read of ~p:~p~n", [Table, Key]),
+    mnesia:abort({busy_read, ExecuteBranch, [Table, Key]}).

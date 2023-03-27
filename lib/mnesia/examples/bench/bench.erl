@@ -166,9 +166,11 @@ set_debug_level_all(C, Debug) ->
 do_start_all([Node | Nodes], Acc, Cookie) when is_atom(Node) ->
     case string:tokens(atom_to_list(Node), [$@]) of
         [Name, Host] ->
-            Arg = lists:concat(["-setcookie ", Cookie]),
+            Args= lists:concat(["-setcookie ", Cookie]) 
+            ++ " -pa "
+            ++ code:which(quantile_estimator),
             ?d("    ~s", [left(Node)]),
-            case slave:start_link(Host, Name, Arg) of
+            case slave:start_link(Host, Name, Args) of
                 {ok, Node} ->
                     load_modules(Node),
                     rpc:call(Node, ?MODULE, bind_schedulers, []),
@@ -198,7 +200,7 @@ load_modules(Node) ->
                  Other -> Other
              end
           end,
-    lists:foreach(Fun, [bench, bench_generate, bench_populate, bench_trans]).
+    lists:foreach(Fun, [bench, bench_generate, bench_populate, bench_trans, quantile_estimator]).
 
 stop_slave_nodes([]) ->
     ok;
@@ -259,6 +261,8 @@ verify_config([{Tag, Val} | T], C) ->
             verify_config(T, C#config{generator_profile = Val});
         generator_profile when Val == random ->
             verify_config(T, C#config{generator_profile = Val});
+        generator_profile when Val == rw_ratio ->
+            verify_config(T, C#config{generator_profile = Val});
         generator_profile when Val == t1 ->
             verify_config(T, C#config{generator_profile = Val});
         generator_profile when Val == t2 ->
@@ -271,6 +275,8 @@ verify_config([{Tag, Val} | T], C) ->
             verify_config(T, C#config{generator_profile = Val});
         generator_profile when Val == ping ->
             verify_config(T, C#config{generator_profile = Val});
+        rw_ratio when is_float(Val) ->
+            verify_config(T, C#config{rw_ratio = Val});
         generator_nodes when is_list(Val) ->
             verify_config(T, C#config{generator_nodes = Val});
         n_generators_per_node when is_integer(Val), Val >= 0 ->
@@ -285,7 +291,9 @@ verify_config([{Tag, Val} | T], C) ->
             verify_config(T, C#config{statistics_detail = Val});
         statistics_detail when Val == debug2 ->
             verify_config(T, C#config{statistics_detail = Val});
-        statistics_detail when Val == debug3 ->
+        statistics_detail when Val == debug_tp ->
+            verify_config(T, C#config{statistics_detail = Val});
+        statistics_detail when Val =:= debug_latency ->
             verify_config(T, C#config{statistics_detail = Val});
         statistics_detail when Val == normal ->
             verify_config(T, C#config{statistics_detail = Val});

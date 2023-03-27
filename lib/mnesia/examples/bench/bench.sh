@@ -4,9 +4,9 @@
 # Created : 21 Jun 2001 by Hakan Mattsson <hakan@cslab.ericsson.se>
 ######################################################################
 
-args="-pa .. -boot start_sasl -sasl errlog_type error -sname bench +sbt db"
-ERL_TOP=/home/vincent/proj/otp/bin/erl
-set -x
+QE_PATH=~/proj/quantile_estimator/ebin
+args="-pa .. -pa $QE_PATH -boot start_sasl -sasl errlog_type error -sname bench +sbt db"
+ERL_TOP=~/proj/otp/bin/erl
 
 if [ $# -eq 0 ] ; then
     

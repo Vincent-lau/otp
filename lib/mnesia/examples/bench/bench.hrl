@@ -26,6 +26,7 @@
 -record(config,
         {activity = transaction,
          generator_profile = random,
+         rw_ratio = 0,
          generator_warmup = timer:seconds(2),
          generator_duration = timer:seconds(15),
          generator_cooldown = timer:seconds(2),
