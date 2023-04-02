@@ -140,6 +140,7 @@ start_all(Args) ->
     Extra = [{extra_db_nodes, Nodes}],
     ?d("~n", []),
     ?d("Starting Mnesia...", []),
+    rpc:multicall(Nodes, global, sync, []),
     case rpc:multicall(Nodes, mnesia, start, [Extra]) of
         {Replies, []} ->
             case [R || R <- Replies, R /= ok] of
@@ -161,6 +162,55 @@ set_debug_level_all(C, Debug) ->
                   -- [node()]],
     rpc:multicall(Nodes, mnesia, set_debug_level, [Debug]).
 
+do_start_all(C, [Node | Nodes], Acc, Cookie)
+    when C#config.start_module =:= port andalso Node =:= node() ->
+    do_start_all(C, Nodes, Acc, Cookie);
+do_start_all(C, [Node | Nodes], Acc, Cookie) when C#config.start_module =:= port ->
+    case string:tokens(atom_to_list(Node), [$@]) of
+        [Name, _Host] ->
+            Prog = "~/proj/otp/bin/erl",
+            Args =
+                " -mnesia "
+                ++ " -pa "
+                ++ filename:dirname(
+                       code:which(?MODULE))
+                ++ " -pa "
+                ++ filename:dirname(
+                       code:which(mnesia))
+                ++ " -sname "
+                ++ Name
+                ++ " -setcookie "
+                ++ atom_to_list(Cookie)
+                ++ " -pa "
+                ++ filename:dirname(
+                       code:which(inet_tcp_proxy_dist))
+                ++ " -proto_dist inet_tcp_proxy",
+            ?d("    ~s", [left(Node)]),
+            case erlang:open_port({spawn, Prog ++ Args}, []) of
+                Port when is_port(Port) ->
+                    io:format(" started~n", []),
+                    timer:sleep(100),
+                    pong = net_adm:ping(Node),
+                    {ok, Cwd} = file:get_cwd(),
+                    Path = code:get_path(),
+                    ok = rpc:call(Node, file, set_cwd, [Cwd]),
+                    true = rpc:call(Node, code, set_path, [Path]),
+                    ok = rpc:call(Node, error_logger, tty, [false]),
+                    load_modules(C, Node),
+                    do_start_all(C, Nodes, [{Node, Port} | Acc], Cookie);
+                Other ->
+                    io:format(" FAILED: ~p~n", [Other]),
+                    stop_port_nodes(Acc),
+                    exit({port_start, Other})
+            end;
+        _ ->
+            io:format(" FAILED: ~p~n", [bad_node]),
+            stop_port_nodes(Acc),
+            exit({port_start, bad_node})
+    end;
+do_start_all(C, [], StartedNodes, _Cookie) when C#config.start_module =:= port ->
+    {Nodes, _Ports} = lists:unzip(StartedNodes),
+    Nodes;
 do_start_all(C, [Node | Nodes], Acc, Cookie) when is_atom(Node) ->
     case string:tokens(atom_to_list(Node), [$@]) of
         [Name, Host] ->
@@ -196,7 +246,7 @@ load_modules(C, Node) ->
                  Other -> Other
              end
           end,
-    Mods = [bench, bench_generate, bench_populate, bench_trans],
+    Mods = [bench, bench_generate, bench_populate, bench_trans, bench_async],
     Mods2 =
         case C#config.statistics_detail of
             debug_latency ->
@@ -220,6 +270,24 @@ do_stop_slave_nodes([Node | Nodes]) ->
     io:format(" ~p~n", [Res]),
     do_stop_slave_nodes(Nodes);
 do_stop_slave_nodes([]) ->
+    ok.
+
+
+stop_port_nodes([]) ->
+    ok;
+stop_port_nodes(NPs) ->
+    ?d("~n", []),
+    ?d("Stopping Erlang nodes...~n", []),
+    ?d("~n", []),
+    do_stop_port_nodes(NPs).
+
+do_stop_port_nodes([{Node, Port} | NPs]) ->
+    ?d("    ~s", [left(Node)]),
+    Res = erlang:port_close(Port),
+    true = rpc:cast(Node, init, stop, []),
+    io:format(" ~p~n", [Res]),
+    do_stop_port_nodes(NPs);
+do_stop_port_nodes([]) ->
     ok.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -251,6 +319,12 @@ do_args_to_config([], Acc) when is_list(Acc) ->
 
 verify_config([{Tag, Val} | T], C) ->
     case Tag of
+        start_module when Val =:= port ->
+            verify_config(T, C#config{start_module = Val});
+        start_module when Val =:= slave ->
+            verify_config(T, C#config{start_module = Val});
+        partition_time when is_integer(Val) ->
+            verify_config(T, C#config{partition_time = Val});
         cookie when is_atom(Val) ->
             verify_config(T, C#config{cookie = Val});
         activity when Val =:= transaction ->

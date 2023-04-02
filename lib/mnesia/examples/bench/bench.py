@@ -10,10 +10,12 @@ log_file = '~/proj/hypermnesia/benchmark/foo4.txt'
 n_replicas = 3
 table_nodes = [f'bench{i}@{socket.gethostname()}' for i in range(1, n_replicas + 1)]
 default_params = {
+    'start_module': 'port',
+    'partition_time': '10000',
     'activity': 'async_dirty',
-    'generator_profile': 'rw_ratio',
+    'generator_profile': 'random',
     'rw_ratio': 0.5,
-    'statistics_detail': 'debug',
+    'statistics_detail': 'debug_tp',
     'generator_warmup': 12000,
     'generator_duration': 90000,
     'generator_cooldown': 12000,
@@ -25,11 +27,11 @@ default_params = {
 }
 
 
-def change_nodes(n_replicas: int) -> dict():
+def change_nodes(n_replicas: int, n_generator_nodes: int) -> dict():
     table_nodes = [f'bench{i}@{socket.gethostname()}' for i in range(1, n_replicas + 1)]
     params = default_params.copy()
     params['table_nodes'] = table_nodes
-    params['generator_nodes'] = table_nodes
+    params['generator_nodes'] = table_nodes[:n_generator_nodes]
     params['n_replicas'] = n_replicas
 
     return params
@@ -58,6 +60,8 @@ def gen_config(params):
 
     filename = "bench0.config"
     content = template.render(
+        start_module=params['start_module'],
+        partition_time=params['partition_time'],
         activity=params['activity'],
         generator_profile=params['generator_profile'],
         rw_ratio=params['rw_ratio'],
@@ -77,8 +81,8 @@ def gen_config(params):
 
 
 def main():
-    for i in [i * 0.1 for i in range(1, 11)]:
-        params = change_profile('rw_ratio', i)
+    for i in range(3, 4, 2):
+        params = change_nodes(i, i)
         gen_config(params)
         os.system(f'echo >> {log_file}')
         os.system(f'echo >> {log_file}')

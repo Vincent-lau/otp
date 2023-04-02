@@ -103,6 +103,7 @@ monitor_loop(C, Parent, Alive, Deceased) ->
             multicall(Alive, reset_statistics),
             Timer = C#config.generator_duration,
             ?d("    ~p seconds actual benchmarking...~n", [Timer div 1000]),
+            spawn_partitioner(C),
             erlang:send_after(Timer, self(), measurement_done),
             monitor_loop(C, Parent, Alive, Deceased);
         measurement_done ->
@@ -170,6 +171,33 @@ periodic_stats_watcher({table, Tab} = Counters) ->
             periodic_stats_watcher(Counters)
     end.
 
+spawn_partitioner(C)
+    when C#config.partition_time > 0 andalso length(C#config.table_nodes) > 2 
+    andalso C#config.start_module =:= port ->
+    Pid = spawn_link(fun() -> network_partitioner(C) end),
+    Nodes = C#config.table_nodes,
+    From = hd(Nodes),
+    To = lists:nth(
+             rand:uniform(length(Nodes) - 1), tl(Nodes)),
+    erlang:send_after(rand:uniform(C#config.generator_duration - C#config.partition_time),
+                      Pid,
+                      {partition, From, To});
+spawn_partitioner(_) ->
+    ok.
+
+network_partitioner(C) ->
+    receive
+        {partition, From, To} ->
+            ?d("Partitioning network from ~p to ~p ~n", [From, To]),
+            spawn(From, fun() -> ok = inet_tcp_proxy_dist:block(To) end),
+            erlang:send_after(C#config.partition_time, self(), {recover, From, To}),
+            network_partitioner(C);
+        {recover, From, To} ->
+            ?d("Recovering network from ~p to ~p ~n", [From, To]),
+            spawn(From, inet_tcp_proxy_dist, allow, [To]),
+            network_partitioner(C)
+    end.
+
 -spec update_tps(workload(), tps(), non_neg_integer()) -> tps().
 update_tps(t1, TPS = #tps{t1 = T1, prev_commits = PC = #prev_commits{t1 = PT1}}, NC) ->
     TPS#tps{t1 = T1 ++ [NC - PT1], prev_commits = PC#prev_commits{t1 = NC}};
@@ -195,7 +223,7 @@ generator_init(Monitor, C) ->
     Counters = reset_counters(C, C#config.statistics_detail),
     SessionTab = ets:new(bench_sessions, [public, {keypos, 1}]),
     case C#config.statistics_detail of
-        debug3 ->
+        debug_tp ->
             WatcherPid = spawn_link(fun() -> periodic_stats_watcher(Counters) end),
             erlang:send_after(1000, WatcherPid, tp_change);
         _ ->
@@ -490,8 +518,7 @@ gen_traffic(C, SessionTab)
             gen_async5(C, SessionTab, Activity)
     end;
 gen_traffic(C, SessionTab)
-    when C#config.activity =:= transaction
-         andalso C#config.generator_profile =:= rw_ratio ->
+    when C#config.activity =:= transaction andalso C#config.generator_profile =:= rw_ratio ->
     ReadPct = C#config.rw_ratio * 100,
     case rand:uniform(100) of
         Rand when Rand > 0, Rand =< ReadPct ->
@@ -995,7 +1022,6 @@ make_equal_length(T, NPTS) when length(NPTS) =/= length(T) ->
             N = length(NPTS1) - length(T1),
             {T1, lists:nthtail(N, NPTS1)}
     end.
-
 
 latency99(_Type, 0, Lats) ->
     Lats;

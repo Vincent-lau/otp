@@ -5,7 +5,8 @@
 ######################################################################
 
 QE_PATH=~/proj/quantile_estimator/ebin
-args="-pa .. -pa $QE_PATH -boot start_sasl -sasl errlog_type error -sname bench +sbt db"
+PROXY_PATH=~/proj/inet_tcp_proxy/ebin
+args="-pa .. -pa $QE_PATH -pa $PROXY_PATH -proto_dist inet_tcp_proxy -boot start_sasl -sasl errlog_type error -sname bench +sbt db"
 ERL_TOP=~/proj/otp/bin/erl
 
 if [ $# -eq 0 ] ; then

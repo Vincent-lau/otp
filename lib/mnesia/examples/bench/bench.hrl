@@ -24,7 +24,9 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 -record(config,
-        {activity = transaction,
+        {start_module = slave,
+         partition_time = 0,
+         activity = transaction,
          generator_profile = random,
          rw_ratio = 0,
          generator_warmup = timer:seconds(2),
@@ -44,7 +46,6 @@
          use_binary_subscriber_key = false,
          always_try_nearest_node = false,
          cookie = bench}).
-
 -record(subscriber,
         {subscriber_number, % string (10 chars)
          subscriber_name,   % string (32 chars)
