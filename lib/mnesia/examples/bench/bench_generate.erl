@@ -101,6 +101,7 @@ monitor_loop(C, Parent, Alive, Deceased) ->
     receive
         warmup_done ->
             multicall(Alive, reset_statistics),
+            display_table_stats(C, [subscriber]),
             Timer = C#config.generator_duration,
             ?d("    ~p seconds actual benchmarking...~n", [Timer div 1000]),
             spawn_partitioner(C),
@@ -273,7 +274,7 @@ generator_loop(Monitor, C, SessionTab, Counters) ->
                       mnesia;
                   async_ec ->
                       mnesia;
-                  _ ->
+                  transaction ->
                       mnesia_frag
               end,
         Before = erlang:monotonic_time(),
@@ -852,7 +853,8 @@ display_statistics(Stats, C) ->
         [{Type, Name, EvalNode, GenNode, Count}
          || {GenNode, GenStats} <- GoodStats, {{Type, Name, EvalNode}, Count} <- GenStats],
     TotalStats = calc_stats_per_tag(lists:keysort(2, FlatStats), 2, []),
-    ?d("Total statistics: ~p~n", [TotalStats]),
+    % ?d("Total statistics: ~p~n", [TotalStats]),
+    display_table_stats(C, [subscriber]),
     {value, {n_aborts, 0, NA, 0, 0, [], []}} =
         lists:keysearch(n_aborts, 1, TotalStats ++ [{n_aborts, 0, 0, 0, 0, [], []}]),
     {value, {n_commits, NC, 0, 0, 0, [], []}} =
@@ -871,7 +873,6 @@ display_statistics(Stats, C) ->
     NG = length(GoodStats),
     NTN = length(C#config.table_nodes),
     WallMicros = C#config.generator_duration * 1000 * NG,
-    io:format("wall time: ~p accmicros ~p~n", [WallMicros, AccMicros]),
     Overhead = catch (WallMicros - AccMicros) / WallMicros,
     ?d("~n", []),
     ?d("Benchmark result...~n", []),
@@ -933,6 +934,21 @@ display_statistics(Stats, C) ->
            io:format("     Outer       : ~p TPS~n", [catch NT * 1000000 * NG div WallMicros]),
            io:format("~n", [])
     end.
+
+
+display_table_stats(C, Tables) ->
+    ?d("Table Stats...~n", []),
+    ?d("~n", []),
+    do_display_table_stats(C, Tables).
+
+do_display_table_stats(_C, []) ->
+    ok;
+do_display_table_stats(C, [Tab | Tables]) ->
+    {Bytes, []} = rpc:multicall([node() | C#config.table_nodes], mnesia, table_info, [Tab, memory]),
+    Bytes2 = [B * 4 || B <- Bytes],
+    ?d("    ~p table size totally ~p bytes.~n", [Tab, Bytes2]),
+    do_display_table_stats(C, Tables).
+
 
 display_calc_stats(Prefix, [{_Tag, 0, 0, 0, 0, [], []} | Rest], NT, Micros) ->
     display_calc_stats(Prefix, Rest, NT, Micros);

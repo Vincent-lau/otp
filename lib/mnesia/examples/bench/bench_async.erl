@@ -201,7 +201,7 @@ busy_read(Table, Key, ExecuteBranch) ->
 do_busy_read(Table, Key, ExecuteBranch, Try) when Try < 10 ->
     case mnesia:read(Table, Key, read) of
         [] ->
-            ?d("busy_read: retrying read of ~p:~p~n", [Table, Key]),
+            % ?d("busy_read: retrying read of ~p:~p~n", [Table, Key]),
             do_busy_read(Table, Key, ExecuteBranch, Try + 1);
         [Subscr] ->
             Subscr;
@@ -209,5 +209,5 @@ do_busy_read(Table, Key, ExecuteBranch, Try) when Try < 10 ->
             hd(Other)
     end;
 do_busy_read(Table, Key, ExecuteBranch, _Try) ->
-    ?d("busy_read: aborting read of ~p:~p~n", [Table, Key]),
+    % ?d("busy_read: aborting read of ~p:~p~n", [Table, Key]),
     mnesia:abort({busy_read, ExecuteBranch, [Table, Key]}).

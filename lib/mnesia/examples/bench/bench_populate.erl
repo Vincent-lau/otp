@@ -195,6 +195,10 @@ do_populate_subscriber(Wlock, Id, C) when Id >= 0 ->
                     suffix = Suffix},
     ?APPLY(mnesia, write, [subscriber, Subscr, Wlock]),
     do_populate_subscriber(Wlock, Id - 1, C);
+do_populate_subscriber(_Wlock, _Id, C) when C#config.activity =:= async_ec ->
+    N = mnesia_monitor:get_env({subscriber, where_to_read}),
+    Bytes = rpc:call(N, mnesia, table_info, [subscriber, memory]) * 4,
+    io:format(" totally ~p bytes~n", [Bytes]);
 do_populate_subscriber(_Wlock, _, _) ->
     io:format(" totally ~p bytes~n", [mnesia:table_info(subscriber, memory) * 4]),
     ok.
@@ -220,6 +224,10 @@ do_populate_group(Wlock, Id, C) when Id >= 0 ->
                allow_delete = Allow},
     ?APPLY(mnesia, write, [group, Group, Wlock]),
     do_populate_group(Wlock, Id - 1, C);
+do_populate_group(_Wlock, _Id, C) when C#config.activity =:= async_ec ->
+    N = mnesia_monitor:get_env({group, where_to_read}),
+    Bytes = rpc:call(N, mnesia, table_info, [group, memory]) * 4,
+    io:format(" totally ~p bytes~n", [Bytes]);
 do_populate_group(_Wlock, _, _) ->
     io:format(" totally ~p bytes~n", [mnesia:table_info(group, memory) * 4]),
     ok.
@@ -246,12 +254,16 @@ populate_server(Wlock, C) ->
     rand:seed(default),
     N = C#config.n_servers,
     ?d("    Populate ~p servers with 100 records each...", [N]),
-    do_populate_server(Wlock, N - 1).
+    do_populate_server(Wlock, N - 1, C).
 
-do_populate_server(Wlock, Id) when Id >= 0 ->
+do_populate_server(Wlock, Id, C) when Id >= 0 ->
     populate_server_suffixes(Wlock, Id, 99),
-    do_populate_server(Wlock, Id - 1);
-do_populate_server(_Wlock, _) ->
+    do_populate_server(Wlock, Id - 1, C);
+do_populate_server(_Wlock, _Id, C) when C#config.activity =:= async_ec ->
+    N = mnesia_monitor:get_env({server, where_to_read}),
+    Bytes = rpc:call(N, mnesia, table_info, [server, memory]) * 4,
+    io:format(" totally ~p bytes~n", [Bytes]);
+do_populate_server(_Wlock, _, _C) ->
     io:format(" totally ~p bytes~n", [mnesia:table_info(server, memory) * 4]),
     ok.
 

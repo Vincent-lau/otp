@@ -6,18 +6,20 @@
 
 QE_PATH=~/proj/quantile_estimator/ebin
 PROXY_PATH=~/proj/inet_tcp_proxy/ebin
-args="-pa .. -pa $QE_PATH -pa $PROXY_PATH -proto_dist inet_tcp_proxy -boot start_sasl -sasl errlog_type error -sname bench +sbt db"
-ERL_TOP=~/proj/otp/bin/erl
+args="-pa .. -pa $QE_PATH -pa $PROXY_PATH  -boot start_sasl \
+-sasl errlog_type error -sname bench +sbt db"
 
+# -proto_dist inet_tcp_proxy"
+
+ERL_TOP=~/proj/otp
+cd $ERL_TOP && make mnesia && \
+cd $ERL_TOP/lib/mnesia/examples/bench && make && \
 if [ $# -eq 0 ] ; then
-    
-    $ERL_TOP $args
-
+    $ERL_TOP/bin/erl $args
 else
   while [ $# -gt 0 ]; do
-    $ERL_TOP $args -s bench run $1 -s erlang halt
+    $ERL_TOP/bin/erl $args -s bench run $1 -s erlang halt
     shift
   done
-
 fi
 

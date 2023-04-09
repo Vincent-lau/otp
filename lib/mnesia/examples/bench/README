@@ -11,6 +11,7 @@ The implementation is organized in the following parts:
   bench.erl          - main API, startup and configuration
   bench.hrl          - record definitions
   bench_populate.erl - create database and populate it with records
+  bench_async.erl    - benchmarking asynchronous operations
   bench_trans.erl    - the actual transactions to be benchmarked
   bench_generate.erl - request generator, statistics computation
 

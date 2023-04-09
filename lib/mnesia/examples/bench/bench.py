@@ -4,18 +4,18 @@ from jinja2 import Environment, FileSystemLoader
 import os,socket
 
 
-log_file = '~/proj/hypermnesia/benchmark/foo4.txt'
+log_file = '~/proj/hypermnesia/benchmark/foo5.txt'
 # log_file = '/dev/null'
 
 n_replicas = 3
 table_nodes = [f'bench{i}@{socket.gethostname()}' for i in range(1, n_replicas + 1)]
 default_params = {
-    'start_module': 'port',
-    'partition_time': '10000',
-    'activity': 'async_dirty',
+    'start_module': 'slave',
+    'partition_time': '0',
+    'activity': 'async_ec',
     'generator_profile': 'random',
     'rw_ratio': 0.5,
-    'statistics_detail': 'debug_tp',
+    'statistics_detail': 'debug',
     'generator_warmup': 12000,
     'generator_duration': 90000,
     'generator_cooldown': 12000,
@@ -23,7 +23,7 @@ default_params = {
     'n_generators_per_node': 1,
     'table_nodes': table_nodes,
     'n_replicas': n_replicas,
-    'n_subscribers': 5000,
+    'n_subscribers': 500,
 }
 
 
@@ -41,6 +41,13 @@ def change_activity(activity: str) -> dict():
     params = default_params.copy()
     params['activity'] = activity
 
+
+    return params
+
+
+def change_subscribers(n_subscribers: int) -> dict():
+    params = default_params.copy()
+    params['n_subscribers'] = n_subscribers
 
     return params
 
@@ -81,7 +88,7 @@ def gen_config(params):
 
 
 def main():
-    for i in range(3, 4, 2):
+    for i in range(5, 9, 2):
         params = change_nodes(i, i)
         gen_config(params)
         os.system(f'echo >> {log_file}')

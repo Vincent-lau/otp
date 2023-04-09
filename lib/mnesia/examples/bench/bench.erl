@@ -65,9 +65,10 @@ run() ->
 run(Args) ->
     C = args_to_config(Args),
     SlaveNodes = start_all(C),
-    set_debug_level_all(C, none),
     bench_populate:start(C),
     timer:sleep(5000),
+    set_debug_level_all(C, none),
+    % rpc:multicall([node() | nodes()], mnesia_causal, reset_with_nodes, [C#config.table_nodes]),
     Result = bench_generate:start(C),
     stop_slave_nodes(SlaveNodes),
     Result.
