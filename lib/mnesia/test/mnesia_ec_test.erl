@@ -103,8 +103,6 @@ ec_rwd(Config, Storage) ->
           foreach,
           [fun(N) -> mnesia:activity(Kind, fun() -> Writer(N, 4) end) end, lists:seq(31, 40)]),
 
-    spawn(NodeA1, inet_tcp_proxy_dist, allow, [NodeA2]),
-
     sleep_if_async(async_ec, 2000),
     Res = lists:seq(1, 40) -- lists:seq(25, 29),
     ?match(Res,
