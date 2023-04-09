@@ -28,9 +28,9 @@
         {coordinators = gb_trees:empty(),
          participants = gb_trees:empty(),
          supervisor,
+         stabiliser,
          blocked_tabs = [],
-         dirty_queue = [],
-         fixed_tabs = []}).
+         dirty_queue = []}).
 
 val(Var) ->
     case ?catch_val_and_stack(Var) of
@@ -48,6 +48,8 @@ init(Parent) ->
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     mnesia_monitor:set_env(causal, true),
+    {SPid, SRef} = {undefined, undefined},
+    mnesia_porset:spawn_stabiliser(),
 
     case val(debug) of
         Debug when Debug /= debug, Debug /= trace ->
@@ -56,10 +58,11 @@ init(Parent) ->
             mnesia_subscr:subscribe(whereis(mnesia_event), {table, schema})
     end,
     proc_lib:init_ack(Parent, {ok, self()}),
-    doit_loop(#state{supervisor = Parent}).
+    doit_loop(#state{stabiliser = {SPid, SRef}, supervisor = Parent}).
 
 doit_loop(#state{coordinators = Coordinators,
                  participants = Participants,
+                 stabiliser = {SPid, SRef},
                  supervisor = Sup} =
               State) ->
     receive
@@ -67,7 +70,7 @@ doit_loop(#state{coordinators = Coordinators,
             dbg_out("received async_ec: ~p~n", [{From, {async_ec, Tid, Commit, Tab}}]),
             case lists:member(Tab, State#state.blocked_tabs) of
                 false ->
-                    mnesia_ec:receive_msg(Tid, Commit, Tab, {rcv, async}),
+                    spawn(mnesia_ec,receive_msg, [Tid, Commit, Tab, {rcv, async}]),
                     doit_loop(State);
                 true ->
                     Item = {async_ec, Tid, mnesia_tm:new_cr_format(Commit), Tab},
@@ -87,6 +90,8 @@ doit_loop(#state{coordinators = Coordinators,
             end;
         {'EXIT', Pid, Reason} ->
             handle_exit(Pid, Reason, State);
+        {'DOWN', SRef, process, SPid, Reason} ->
+            handle_exit(SPid, Reason, State);
         Msg ->
             verbose("** ERROR ** ~p got unexpected message: ~tp~n", [?MODULE, Msg]),
             doit_loop(State)
@@ -736,6 +741,10 @@ handle_exit(Pid, _Reason, State) when node(Pid) /= node() ->
     doit_loop(State);
 handle_exit(Pid, _Reason, State) when Pid == State#state.supervisor ->
     %% Our supervisor has died, time to stop
+    do_stop(State);
+handle_exit(Pid, Reason, State) when Pid == element(1, State#state.stabiliser) ->
+    %% Our stablier has died, time to stop
+    dbg_out("stablier died: ~p~n", [Reason]),
     do_stop(State).
 
 do_stop(#state{coordinators = Coordinators}) ->

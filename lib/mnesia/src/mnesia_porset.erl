@@ -1,23 +1,3 @@
-%
-%% %CopyrightBegin%
-%%
-%% Copyright Ericsson AB 1996-2022. All Rights Reserved.
-%%
-%% Licensed under the Apache License, Version 2.0 (the "License");
-%% you may not use this file except in compliance with the License.
-%% You may obtain a copy of the License at
-%%
-%%     http://www.apache.org/licenses/LICENSE-2.0
-%%
-%% Unless required by applicable law or agreed to in writing, software
-%% distributed under the License is distributed on an "AS IS" BASIS,
-%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-%% See the License for the specific language governing permissions and
-%% limitations under the License.
-%%
-%% %CopyrightEnd%
-%%
-
 -module(mnesia_porset).
 
 -include("mnesia.hrl").
@@ -26,6 +6,7 @@
          db_select/2, db_prev/2, db_all_keys/1, db_match_erase/3]).
 -export([mktab/2, unsafe_mktab/2]).
 -export([remote_match_object/2]).
+-export([spawn_stabiliser/0]).
 
 -type op() :: write | delete.
 -type val() :: any().
@@ -34,8 +15,6 @@
 -type storage() :: ram_copies | disk_copies | disc_only_copies | {ext, atom(), atom()}.
 
 -import(mnesia_lib, [important/2, dbg_out/2, verbose/2, warning/2]).
-
--compile([nowarn_unused_function]).
 
 val(Var) ->
     case ?catch_val_and_stack(Var) of
@@ -58,7 +37,7 @@ unsafe_mktab(Tab, [{keypos, 2}, public, named_table, Type | EtsOpts])
     mnesia_monitor:unsafe_mktab(Tab1, Args1).
 
 porset_name(Tab) ->
-    {list_to_atom(atom_to_list(Tab)), list_to_atom(atom_to_list(Tab) ++ "_tlog")}.
+    {list_to_atom(atom_to_list(Tab)), list_to_atom(atom_to_list(Tab) ++ "_s")}.
 
 %%==================== writes ====================
 
@@ -119,17 +98,10 @@ db_match_erase(Storage, Tab, Pat) ->
 %%==================== reads ====================
 
 db_get(Tab, Key) ->
-    Res = mnesia_lib:db_get(Tab, Key),
-    Res2 =
-        lists:filtermap(fun(Tup) ->
-                           case tup_is_write(Tup) of
-                               false -> false;
-                               true -> {true, get_val_tup(Tup)}
-                           end
-                        end,
-                        Res),
-    dbg_out("running my own lookup function on ~p, got ~p~n", [Tab, Res2]),
-    uniq(Tab, Res2).
+    Tups = mnesia_lib:db_get(Tab, Key),
+    Res = [get_val_tup(Tup) || Tup <- Tups],
+    dbg_out("running my own lookup function on ~p, got ~p~n", [Tab, Res]),
+    uniq(Tab, Res).
 
 -spec resolve_cc_add([element()]) -> [element()].
 resolve_cc_add(Res) when length(Res) =< 1 ->
@@ -207,17 +179,9 @@ db_next_key(Tab, Key) ->
     dbg_out("running my own next function on ~p", [Tab]),
     mnesia_lib:db_next_key(Tab, Key).
 
-next(porset_copies, Tab, Key) ->
-    ets:next(
-        mnesia_lib:val({?MODULE, Tab}), Key).
-
 db_prev(Tab, Key) ->
     dbg_out("running my own prev function on ~p", [Tab]),
     mnesia_lib:db_prev_key(Tab, Key).
-
-update_counter(porset_copies, Tab, C, Val) ->
-    ets:update_counter(
-        mnesia_lib:val({?MODULE, Tab}), C, Val).
 
 db_select(Tab, Spec) ->
     Spec1 =
@@ -225,32 +189,6 @@ db_select(Tab, Spec) ->
     Res = mnesia_lib:db_select(Tab, Spec1),
     dbg_out("running my own select function on ~p with spec ~p got ~p", [Tab, Spec, Res]),
     Res.
-
-select('$end_of_table' = End) ->
-    End;
-select({porset_copies, C}) ->
-    ets:select(C).
-
-select(Alias, Tab, Ms) ->
-    Res = select(Alias, Tab, Ms, 100000),
-    select_1(Res).
-
-select_1('$end_of_table') ->
-    [];
-select_1({Acc, C}) ->
-    case ets:select(C) of
-        '$end_of_table' ->
-            Acc;
-        {New, Cont} ->
-            select_1({New ++ Acc, Cont})
-    end.
-
-select(porset_copies, Tab, Ms, Limit) when is_integer(Limit); Limit =:= infinity ->
-    ets:select(
-        mnesia_lib:val({?MODULE, Tab}), Ms, Limit).
-
-repair_continuation(Cont, Ms) ->
-    ets:repair_continuation(Cont, Ms).
 
 clear_meta_for_user(Tups) ->
     [get_val_tup(Tup) || Tup <- Tups].
@@ -275,7 +213,6 @@ causal_compact(Storage, Tab, Ele) ->
     {Pid1, Mref1} =
         spawn_monitor(fun() ->
                          remove_obsolete(Storage, Tab, Ele),
-                         dbg_out("sending message to ~p~n", [whereis(waiter)]),
                          receive {Parent, Mref} -> Parent ! {Mref, {obsolete, ok}} end
                       end),
     {Pid2, Mref2} =
@@ -312,7 +249,7 @@ wait_causal_compact(Mref) ->
 %% @end
 -spec redundant(storage(), mnesia:table(), element()) -> boolean().
 redundant(_Storage, _Tab, {_Ts, {delete, _Val}}) ->
-    dbg_out("element is a delete, redundant", []),
+    dbg_out("element is a delete, redundant~n", []),
     true;
 redundant(Storage, Tab, Ele) ->
     dbg_out("checking redundancy~n", []),
@@ -326,30 +263,81 @@ redundant(Storage, Tab, Ele) ->
 %% @edoc removes elements that are obsoleted by Ele
 -spec remove_obsolete(storage(), mnesia:table(), element()) -> ok.
 remove_obsolete(Storage, Tab, Ele) ->
-    dbg_out("checking obsolete~n", []),
     Key = get_val_key(get_val_ele(Ele)),
-    % dbg_out("key ~p~n", [Key]),
-    Tups = mnesia_lib:db_get(Storage, Tab, Key),
-    % dbg_out("existing tuples ~p~n", [Tups]),
-    Keep = lists:filter(fun(Tup) -> not obsolete(Tab, obj2ele(Tup), Ele) end, Tups),
-    % dbg_out("removed obsolete ~p kept ~p~n", [Tups -- Keep, Keep]),
-    mnesia_lib:db_erase(Storage, Tab, Key),
-    mnesia_lib:db_put(Storage, Tab, Keep),
-    ok.
+    case mnesia_lib:db_get(Storage, Tab, Key) of
+        [] ->
+            ok;
+        Tups when length(Tups) > 0 ->
+            Keep = lists:filter(fun(Tup) -> not obsolete(Tab, obj2ele(Tup), Ele) end, Tups),
+            mnesia_lib:db_erase(Storage, Tab, Key),
+            mnesia_lib:db_put(Storage, Tab, Keep),
+            ok
+    end.
 
-%% only called when we do match delete
-% -spec match_remove_obsolete(storage(), mnesia:table(), tuple()) -> ok.
-% match_remove_obsolete(Storage, Tab, Pat0)->
-%     dbg_out("matching obsolete~n", []),
-%     Pat = pat_pad(Pat0, write),
-%     Tups = mnesia_lib:db_match_object(Storage, Tab, Pat),
-%     Keep = lists:filter(fun(Tup) -> not obsolete(Tab, obj2ele(Tup), Ele) end, Tups),
-%     % dbg_out("key ~p~n", [Key]),
-%     % dbg_out("existing tuples ~p~n", [Tups]),
-%     % dbg_out("removed obsolete ~p kept ~p~n", [Tups -- Keep, Keep]),
-%     mnesia_lib:db_erase(Storage, Tab, Key),
-%     mnesia_lib:db_put(Storage, Tab, Keep),
-%     ok.
+spawn_stabiliser() ->
+    {Pid, Ref} = spawn_monitor(fun() -> causal_stabiliser([]) end),
+    ok = mnesia_causal:register_stabiliser(Pid),
+    erlang:send_after(1000, Pid, stabilise),
+    {Pid, Ref}.
+
+causal_stabiliser(AccTs) ->
+    receive
+        {stable_ts, Ts} ->
+            causal_stabiliser([Ts | AccTs]);
+        stabilise ->
+            % TODO checking all tables not might be a good way
+            Tables = mnesia:system_info(tables),
+            Porsets =
+                lists:filter(fun(Tab) ->
+                                Type = mnesia_monitor:get_env({Tab, setorbag}),
+                                Type =:= porset orelse Type =:= porbag
+                             end,
+                             Tables),
+            lists:foreach(fun(Tab) -> stablise(Tab, AccTs) end, Porsets),
+            erlang:send_after(1000, self(), stabilise),
+            causal_stabiliser([]);
+        Unexpected ->
+            error({unexpected, Unexpected})
+    end.
+
+
+stablise(_Tab, []) ->
+    dbg_out("no stable time~n", []),
+    ok;
+stablise(Tab, [T | Ts]) ->
+    case find_by_ts(Tab, T) of
+        [] ->
+           ok;
+        Tuples ->
+            io:format("stablising ~p with ts ~p~n", [Tuples, T]),
+            Res2 = [set_ts(Tup, mnesia_causal:bot()) || Tup <- Tuples],
+            mnesia_lib:db_put(Tab, Res2),
+            [mnesia_lib:db_erase(Tab, element(key_pos(), Tup)) || Tup <- Tuples]
+        end,
+    stablise(Tab, Ts).
+
+
+% -spec stablise(tuple()) -> {boolean(), tuple()}.
+% stablise(Tups) ->
+%     lists:foldl(fun(Tup, {HasStable, Res}) ->
+%                    Ts = get_ts(Tup),
+%                    case not mnesia_causal:is_bot(Ts) andalso mnesia_causal:tcstable(Ts) of
+%                        true -> {true, [set_ts(Tup, mnesia_causal:bot()) | Res]};
+%                        false -> {HasStable, [Tup | Res]}
+%                    end
+%                 end,
+%                 {false, []},
+%                 Tups).
+
+-spec find_by_ts(mnesia:table(), ts()) -> [tuple()].
+find_by_ts(Tab, Ts) ->
+    Pat = val({Tab, wild_pattern}),
+    Pat2 = erlang:append_element(Pat, Ts),
+    Pat3 = erlang:append_element(Pat2, '_'),
+    db_select(Tab, [{Pat3, [], [Ts]}]).
+
+
+
 
 %%% Helper
 
@@ -360,8 +348,8 @@ key_pos() ->
 obj2ele(Obj) ->
     {get_ts(Obj), {get_op(Obj), get_val_tup(Obj)}}.
 
-ele2obj({Ts, {Op, Val}}) ->
-    add_meta(Val, Ts, Op).
+% ele2obj({Ts, {Op, Val}}) ->
+%     add_meta(Val, Ts, Op).
 
 get_val_ele({_Ts, {_Op, V}}) ->
     V.
@@ -394,22 +382,22 @@ equals(Tab, V1, V2) ->
 get_val_key(V) ->
     element(key_pos(), V).
 
--spec add_ts(tuple(), ts()) -> tuple().
-add_ts(Obj, Ts) ->
-    erlang:append_element(Obj, Ts).
+% -spec add_ts(tuple(), ts()) -> tuple().
+% add_ts(Obj, Ts) ->
+%     erlang:append_element(Obj, Ts).
 
-% @doc this changes the tuple with the last element as the ts to the key
+% @doc this changes the tuple whose last element is the timestamp to the key
 % by {key, ts}, and the last element is now the key, which will be the index
--spec transform_key(tuple()) -> tuple().
-transform_key(Obj) when is_map(element(tuple_size(Obj), Obj)) ->
-    K = erlang:element(key_pos(), Obj),
-    Ts = erlang:element(tuple_size(Obj), Obj),
-    O2 = setelement(key_pos(), Obj, {K, Ts}),
-    setelement(tuple_size(O2), Obj, K).
+% -spec transform_key(tuple()) -> tuple().
+% transform_key(Obj) when is_map(element(tuple_size(Obj), Obj)) ->
+%     K = erlang:element(key_pos(), Obj),
+%     Ts = erlang:element(tuple_size(Obj), Obj),
+%     O2 = setelement(key_pos(), Obj, {K, Ts}),
+%     setelement(tuple_size(O2), Obj, K).
 
--spec add_op(tuple(), op()) -> tuple().
-transform_meta(Obj, Op) ->
-    add_op(transform_key(Obj), Op).
+% -spec add_op(tuple(), op()) -> tuple().
+% transform_meta(Obj, Op) ->
+%     add_op(transform_key(Obj), Op).
 
 add_op(Obj, Op) ->
     erlang:append_element(Obj, Op).
@@ -420,17 +408,20 @@ get_op(Obj) ->
 get_ts(Obj) ->
     element(tuple_size(Obj) - 1, Obj).
 
--spec add_meta(tuple(), ts(), op()) -> tuple().
-add_meta(Obj, Ts, Op) ->
-    add_op(add_ts(Obj, Ts), Op).
+set_ts(Obj, Ts) ->
+    setelement(tuple_size(Obj) - 1, Obj, Ts).
+
+% -spec add_meta(tuple(), ts(), op()) -> tuple().
+% add_meta(Obj, Ts, Op) ->
+%     add_op(add_ts(Obj, Ts), Op).
 
 -spec delete_meta(tuple()) -> tuple().
 delete_meta(Obj) ->
     Last = tuple_size(Obj),
     erlang:delete_element(Last - 1, erlang:delete_element(Last, Obj)).
 
-tup_is_write(Tup) ->
-    get_op(Tup) =:= write.
+% tup_is_write(Tup) ->
+%     get_op(Tup) =:= write.
 
 pat_pad(Pat, Op) ->
     erlang:append_element(
