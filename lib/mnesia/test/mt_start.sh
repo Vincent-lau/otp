@@ -13,5 +13,7 @@ erlcmd2="erl -sname a2 $p $args"
 cd $ERL_TOP && make mnesia && cd $top/test && \
 ~/proj/otp/bin/erl -make && \
 ~/proj/otp/bin/erl -name a@127.0.0.1 -pa '/home/vincent/proj/inet_tcp_proxy/ebin' \
--pa $top/examples -pa $top/src -pa $top/ebin $top/test -debug -proto_dist inet_tcp_proxy
+-pa $top/examples -pa $top/src -pa $top/ebin $top/test -debug 
+
+# -proto_dist inet_tcp_proxy
 
