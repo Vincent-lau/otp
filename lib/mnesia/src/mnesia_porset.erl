@@ -2,8 +2,8 @@
 
 -include("mnesia.hrl").
 
--export([db_put/3, db_erase/3, db_get/2, db_first/1, db_last_key/1, db_next_key/2,
-         db_select/2, db_prev/2, db_all_keys/1, db_match_erase/3]).
+-export([db_put/3, db_erase/3, db_get/2, db_first/1, db_last/1, db_next_key/2,
+         db_select/2, db_prev_key/2, db_all_keys/1, db_match_erase/3]).
 -export([mktab/2, unsafe_mktab/2]).
 -export([remote_match_object/2]).
 -export([spawn_stabiliser/0]).
@@ -171,7 +171,7 @@ db_first(Tab) ->
     dbg_out("running my own first function on ~p~n", [Tab]),
     mnesia_lib:db_first(Tab).
 
-db_last_key(Tab) ->
+db_last(Tab) ->
     dbg_out("running my own last function on ~p~n", [Tab]),
     mnesia_lib:db_last(Tab).
 
@@ -179,7 +179,7 @@ db_next_key(Tab, Key) ->
     dbg_out("running my own next function on ~p", [Tab]),
     mnesia_lib:db_next_key(Tab, Key).
 
-db_prev(Tab, Key) ->
+db_prev_key(Tab, Key) ->
     dbg_out("running my own prev function on ~p", [Tab]),
     mnesia_lib:db_prev_key(Tab, Key).
 
