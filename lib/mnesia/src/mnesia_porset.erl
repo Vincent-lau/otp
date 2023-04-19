@@ -16,6 +16,7 @@
 
 -import(mnesia_lib, [important/2, dbg_out/2, verbose/2, warning/2]).
 
+stabiliser_interval() -> 1000000.
 val(Var) ->
     case ?catch_val_and_stack(Var) of
         {'EXIT', Stacktrace} ->
@@ -277,7 +278,7 @@ remove_obsolete(Storage, Tab, Ele) ->
 spawn_stabiliser() ->
     {Pid, Ref} = spawn_monitor(fun() -> causal_stabiliser([]) end),
     ok = mnesia_causal:register_stabiliser(Pid),
-    erlang:send_after(1000, Pid, stabilise),
+    erlang:send_after(stabiliser_interval(), Pid, stabilise),
     {Pid, Ref}.
 
 causal_stabiliser(AccTs) ->
@@ -294,7 +295,7 @@ causal_stabiliser(AccTs) ->
                              end,
                              Tables),
             lists:foreach(fun(Tab) -> stablise(Tab, AccTs) end, Porsets),
-            erlang:send_after(1000, self(), stabilise),
+            erlang:send_after(stabiliser_interval(), self(), stabilise),
             causal_stabiliser([]);
         Unexpected ->
             error({unexpected, Unexpected})

@@ -123,7 +123,9 @@
 	 do_read_table_property/2,
 	 do_delete_table_property/2,
          do_write_table_property/2,
-         do_change_table_copy_type/3]).
+         do_change_table_copy_type/3,
+     where_to_commit/2]).
+
 
 -include("mnesia.hrl").
 -include_lib("kernel/include/file.hrl").

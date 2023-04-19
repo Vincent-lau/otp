@@ -8,14 +8,17 @@
          first/3, last/3, prev/4, next/4, index_match_object/6, index_read/6, table_info/4,
          select/5]).
 -export([receive_msg/4]).
+-export([repair_inconsistency/3]).
 -export([start/0, init/1]).
 
 -compile([nowarn_unused_vars]).
 
 % -behaviour(mnesia_access).
 
+-define(ACKER, mnesia_ec_ack).
+
 -record(prep,
-        {protocol = sym_trans,
+        {protocol = async_ec,
          %% async_dirty | sync_dirty | sym_trans | sync_sym_trans | asym_trans | sync_asym_trans
          records = [],
          prev_tab = [], % initiate to a non valid table name
@@ -29,8 +32,10 @@
          participants = gb_trees:empty(),
          supervisor,
          stabiliser,
+         acker,
          blocked_tabs = [],
-         dirty_queue = []}).
+         ec_queue = []}).
+-record(ack_state, {buffer :: #{node() => sets:set()}}).
 
 val(Var) ->
     case ?catch_val_and_stack(Var) of
@@ -48,9 +53,8 @@ init(Parent) ->
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     mnesia_monitor:set_env(causal, true),
-    {SPid, SRef} = {undefined, undefined},
-    mnesia_porset:spawn_stabiliser(),
-
+    {SPid, SRef} = mnesia_porset:spawn_stabiliser(),
+    {APid, ARef} = spawn_acker(no),
     case val(debug) of
         Debug when Debug /= debug, Debug /= trace ->
             ignore;
@@ -58,23 +62,30 @@ init(Parent) ->
             mnesia_subscr:subscribe(whereis(mnesia_event), {table, schema})
     end,
     proc_lib:init_ack(Parent, {ok, self()}),
-    doit_loop(#state{stabiliser = {SPid, SRef}, supervisor = Parent}).
+    doit_loop(#state{stabiliser = {SPid, SRef},
+                     acker = {APid, ARef},
+                     supervisor = Parent}).
 
-doit_loop(#state{coordinators = Coordinators,
-                 participants = Participants,
-                 stabiliser = {SPid, SRef},
-                 supervisor = Sup} =
-              State) ->
+spawn_acker(no) ->
+    {undefined, undefined};
+spawn_acker(yes) ->
+    Buffer = maps:from_list([{Node, maps:new()} || Node <- mnesia_lib:all_nodes()]),
+    {APid, ARef} = spawn_monitor(fun() -> ack_loop(#ack_state{buffer = Buffer}) end),
+    register(?ACKER, APid),
+    {APid, ARef}.
+
+doit_loop(#state{stabiliser = {SPid, SRef}, acker = {APid, ARef}} = State) ->
     receive
         {From, {async_ec, Tid, Commit, Tab}} ->
             dbg_out("received async_ec: ~p~n", [{From, {async_ec, Tid, Commit, Tab}}]),
+            send_ack(Commit),
             case lists:member(Tab, State#state.blocked_tabs) of
                 false ->
-                    spawn(mnesia_ec,receive_msg, [Tid, Commit, Tab, {rcv, async}]),
+                    spawn(mnesia_ec, receive_msg, [Tid, Commit, Tab, {rcv, async}]),
                     doit_loop(State);
                 true ->
                     Item = {async_ec, Tid, mnesia_tm:new_cr_format(Commit), Tab},
-                    State2 = State#state{dirty_queue = [Item | State#state.dirty_queue]},
+                    State2 = State#state{ec_queue = [Item | State#state.ec_queue]},
                     doit_loop(State2)
             end;
         {From, {sync_ec, Tid, Commit, Tab}} ->
@@ -85,13 +96,15 @@ doit_loop(#state{coordinators = Coordinators,
                     doit_loop(State);
                 true ->
                     Item = {sync_ec, From, Tid, mnesia_tm:new_cr_format(Commit), Tab},
-                    State2 = State#state{dirty_queue = [Item | State#state.dirty_queue]},
+                    State2 = State#state{ec_queue = [Item | State#state.ec_queue]},
                     doit_loop(State2)
             end;
         {'EXIT', Pid, Reason} ->
             handle_exit(Pid, Reason, State);
         {'DOWN', SRef, process, SPid, Reason} ->
             handle_exit(SPid, Reason, State);
+        {'DOWN', ARef, process, APid, Reason} ->
+            handle_exit(APid, Reason, State);
         Msg ->
             verbose("** ERROR ** ~p got unexpected message: ~tp~n", [?MODULE, Msg]),
             doit_loop(State)
@@ -259,7 +272,7 @@ ec(Protocol, Item) ->
             mnesia:abort({bad_activity, Protocol})
     end.
 
-%% Returns a prep record with all items in reverse order
+%% @doc @returns a prep record with all items in reverse order
 prepare_items(Tid, Tab, Key, Items, Prep) when Prep#prep.prev_tab == Tab ->
     Types = Prep#prep.prev_types,
     Snmp = Prep#prep.prev_snmp,
@@ -268,6 +281,7 @@ prepare_items(Tid, Tab, Key, Items, Prep) when Prep#prep.prev_tab == Tab ->
     Prep#prep{records = Recs2};
 prepare_items(Tid, Tab, Key, Items, Prep) ->
     Types = val({Tab, where_to_commit}),
+    % mnesia_schema:where_to_commit(Tab, mnesia_schema:get_table_properties(Tab)),
     case Types of
         [] ->
             mnesia:abort({no_exists, Tab});
@@ -413,10 +427,10 @@ sync_send_ec(_Tid, [], _Tab, WaitFor) ->
     {WaitFor, {'EXIT', {aborted, {node_not_running, WaitFor}}}}.
 
 %% @returns {WaitFor, Res}
-async_send_ec(_Tid, _Nodes, Tab, nowhere) ->
+async_send_ec(_Tid, _Committs, Tab, nowhere) ->
     {[], {'EXIT', {aborted, {no_exists, Tab}}}};
-async_send_ec(Tid, Nodes, Tab, ReadNode) ->
-    async_send_ec(Tid, Nodes, Tab, ReadNode, [], ok).
+async_send_ec(Tid, Commits, Tab, ReadNode) ->
+    async_send_ec(Tid, Commits, Tab, ReadNode, [], ok).
 
 async_send_ec(Tid, [Head | Tail], Tab, ReadNode, WaitFor, Res) ->
     dbg_out("async_send_ec Nodes: ~p~n", [[Head | Tail]]),
@@ -434,10 +448,78 @@ async_send_ec(Tid, [Head | Tail], Tab, ReadNode, WaitFor, Res) ->
        true ->
            {?MODULE, Node} ! {self(), {async_ec, Tid, Head, Tab}},
            dbg_out("sending ~p to ~p~n", [{async_ec, Tid, Head, Tab}, {?MODULE, Node}]),
+           needs_ack(Tid, Head, Tab),
            async_send_ec(Tid, Tail, Tab, ReadNode, WaitFor, Res)
     end;
 async_send_ec(_Tid, [], _Tab, _ReadNode, WaitFor, Res) ->
     {WaitFor, Res}.
+
+repair_inconsistency(Replies, Context, Status) ->
+    case whereis(?ACKER) of
+        undefined ->
+            dbg_out("acker not running, skip repair~n", []);
+        Pid when is_pid(Pid) ->
+            do_repair_inconsistency(Replies, Context, Status)
+    end.
+
+do_repair_inconsistency([{true, Node} | Replies], Context, Status) ->
+    Msg = {repair_inconsistency, Context, Node},
+    mnesia_lib:report_system_event(Msg),
+    ?ACKER ! {self(), {sync_buffer, Node}},
+    do_repair_inconsistency(Replies, Context, Status);
+do_repair_inconsistency([{false, _Node} | Replies], Context, Status) ->
+    do_repair_inconsistency(Replies, Context, Status);
+do_repair_inconsistency([{badrpc, _Reason} | Replies], Context, Status) ->
+    do_repair_inconsistency(Replies, Context, Status);
+do_repair_inconsistency([], _Context, Status) ->
+    Status.
+
+-spec needs_ack(tuple(), #commit{}, mnesia:table()) -> ok.
+needs_ack(Tid, Commit, Tab) ->
+    case whereis(?ACKER) of
+        undefined ->
+            ok;
+        Pid when is_pid(Pid) ->
+            ?ACKER ! {self(), {needs_ack, Tid, Commit, Tab}},
+            ok
+    end.
+
+-spec send_ack(#commit{}) -> ok.
+send_ack(Commit = #commit{sender = Sender}) ->
+    case whereis(?ACKER) of
+        undefined ->
+            ok;
+        Pid when is_pid(Pid) ->
+            ?ACKER ! {self(), {ec_ack, Commit}},
+            ok
+    end.
+
+ack_loop(#ack_state{buffer = Buffer}) ->
+    receive
+        {From, {ec_ack, Commit}} ->
+            Node = erlang:node(From),
+            Buf = maps:get(Node, Buffer),
+            Buf2 = maps:remove(Commit#commit.ts, Buf),
+            Buffer2 = maps:put(Node, Buf2, Buffer),
+            ack_loop(#ack_state{buffer = Buffer2});
+        {_From, {needs_ack, Tid, Commit = #commit{node = Node, ts = Ts}, Tab}} ->
+            Buf = maps:get(Node, Buffer),
+            Buf2 = maps:put(Ts, {Tid, Commit, Tab}, Buf),
+            Buffer2 = maps:put(Node, Buf2, Buffer),
+            ack_loop(#ack_state{buffer = Buffer2});
+        {_From, {sync_buffer, Node}} ->
+            Buf = maps:get(Node, Buffer),
+            maps:foreach(fun(K, {Tid, Cmt, Tab}) ->
+                            {WaitFor, FirstRes} = async_send_ec(Tid, [Cmt], Tab, Node),
+                            rec_ec(WaitFor, FirstRes)
+                         end,
+                         Buf),
+            Buffer2 = maps:put(Node, #{}, Buffer),
+            ack_loop(#ack_state{buffer = Buffer2});
+        Msg ->
+            warning("ack_loop unexpected msg: ~p~n", [Msg]),
+            ack_loop(#ack_state{buffer = Buffer})
+    end.
 
 rec_ec([Node | Tail], Res) when Node /= node() ->
     NewRes = get_ec_reply(Node, Res),
@@ -729,8 +811,6 @@ ec_match_object(Tab, Pat)
 ec_match_object(Tab, Pat) ->
     mnesia:abort({bad_type, Tab, Pat}).
 
-
-
 ec_index_match_object(Tab, Pat, Attr) ->
     unimplemnted.
 
@@ -745,6 +825,10 @@ handle_exit(Pid, _Reason, State) when Pid == State#state.supervisor ->
 handle_exit(Pid, Reason, State) when Pid == element(1, State#state.stabiliser) ->
     %% Our stablier has died, time to stop
     dbg_out("stablier died: ~p~n", [Reason]),
+    do_stop(State);
+handle_exit(Pid, Reason, State) when Pid == element(1, State#state.acker) ->
+    %% Our acker has died, time to stop
+    dbg_out("acker died: ~p~n", [Reason]),
     do_stop(State).
 
 do_stop(#state{coordinators = Coordinators}) ->

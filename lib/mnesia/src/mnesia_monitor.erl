@@ -832,6 +832,7 @@ detect_inconcistency(Nodes, Context) ->
     {Replies, _BadNodes} =
 	rpc:multicall(Downs, ?MODULE, has_remote_mnesia_down, [node()]),
     dbg_out("detecting inconsistency~n", []),
+    mnesia_ec:repair_inconsistency(Replies, Context, ok),
     report_inconsistency(Replies, Context, ok).
 
 has_remote_mnesia_down(Node) ->
@@ -848,8 +849,8 @@ report_inconsistency([{true, Node} | Replies], Context, _Status) ->
     %% Oops, Mnesia is already running on the
     %% other node AND we both regard each
     %% other as down. The database is
-    %% potentially inconsistent and we has to
-    %% do tell the applications about it, so
+    %% potentially inconsistent and we have to
+    %% tell the applications about it, so
     %% they may perform some clever recovery
     %% action.
     Msg = {inconsistent_database, Context, Node},
