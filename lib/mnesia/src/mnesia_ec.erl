@@ -53,7 +53,7 @@ init(Parent) ->
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     mnesia_monitor:set_env(causal, true),
-    {SPid, SRef} = mnesia_porset:spawn_stabiliser(),
+    {SPid, SRef} = mnesia_pawset:spawn_stabiliser(),
     {APid, ARef} = spawn_acker(no),
     case val(debug) of
         Debug when Debug /= debug, Debug /= trace ->
@@ -157,7 +157,7 @@ match_object(Tid, Ts, Tab, Pat, LockKind) ->
 
 all_keys({SyncMode, _Pid} = Tid, _Ts, Tab, _LockKind)
     when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
-    mnesia_porset:db_all_keys(Tab);
+    mnesia_pawset:db_all_keys(Tab);
 all_keys(_Tid, _Ts, Tab, _LockKind) ->
     mnesia:abort({bad_type, Tab}).
 
@@ -397,6 +397,7 @@ receive_msg(Tid, Commit, Tab, local) ->
     mnesia_causal:deliver_one(Commit),
     do_ec(Tid, Commit);
 receive_msg(Tid, Commit, Tab, {rcv, async}) ->
+    % mnesia_pawset:reify(Tid, Commit, Tab),
     Deliverable = mnesia_causal:rcv_msg(Tid, Commit, Tab),
     dbg_out("found async_ec devliverable commits: ~p~n", [Deliverable]),
     lists:foreach(fun({Tid1, Commit1, Tab1}) ->
@@ -632,13 +633,13 @@ do_update(_Tid, _Storage, [], Ts, Res) ->
 
 do_update_op(Tid, Storage, {{Tab, K}, Obj, write}) ->
     commit_write(?catch_val({Tab, commit_work}), Tid, Storage, Tab, K, Obj, undefined),
-    mnesia_porset:db_put(Storage, Tab, Obj);
+    mnesia_pawset:db_put(Storage, Tab, Obj);
 do_update_op(Tid, Storage, {{Tab, K}, Obj, delete}) ->
     % note here parameter is Obj rather than Val, this is mostly better since we
     % can always extract the key from the object
     % we send Obj instead of Key for processing
     commit_delete(?catch_val({Tab, commit_work}), Tid, Storage, Tab, K, Obj, undefined),
-    mnesia_porset:db_erase(Storage, Tab, Obj);
+    mnesia_pawset:db_erase(Storage, Tab, Obj);
 do_update_op(Tid, Storage, {{Tab, K}, {RecName, Incr}, update_counter}) ->
     {NewObj, OldObjs} =
         try
@@ -659,7 +660,7 @@ do_update_op(Tid, Storage, {{Tab, K}, {RecName, Incr}, update_counter}) ->
     element(3, NewObj);
 do_update_op(Tid, Storage, {{Tab, Key}, Obj, delete_object}) ->
     commit_del_object(?catch_val({Tab, commit_work}), Tid, Storage, Tab, Key, Obj),
-    mnesia_porset:db_match_erase(Storage, Tab, Obj);
+    mnesia_pawset:db_match_erase(Storage, Tab, Obj);
 do_update_op(Tid, Storage, {{Tab, Key}, Obj, clear_table}) ->
     commit_clear(?catch_val({Tab, commit_work}), Tid, Storage, Tab, Key, Obj),
     mnesia_lib:db_match_erase(Storage, Tab, Obj).
@@ -784,22 +785,22 @@ do_ec_rpc(Tab, Node, M, F, Args) ->
     end.
 
 ec_read(Tab, Key) ->
-    mnesia_porset:db_get(Tab, Key).
+    mnesia_pawset:db_get(Tab, Key).
 
 ec_select(Tab, Spec) ->
-    mnesia_porset:db_select(Tab, Spec).
+    mnesia_pawset:db_select(Tab, Spec).
 
 ec_first(Tab) ->
-    mnesia_porset:db_first(Tab).
+    mnesia_pawset:db_first(Tab).
 
 ec_last(Tab) ->
-    mnesia_porset:db_last(Tab).
+    mnesia_pawset:db_last(Tab).
 
 ec_prev(Tab, Key) ->
-    mnesia_porset:db_prev_key(Tab, Key).
+    mnesia_pawset:db_prev_key(Tab, Key).
 
 ec_next(Tab, Key) ->
-    mnesia_porset:db_next_key(Tab, Key).
+    mnesia_pawset:db_next_key(Tab, Key).
 
 -spec ec_match_object(Tab, Pattern) -> [Record]
     when Tab :: mnesia:table(),
@@ -807,7 +808,7 @@ ec_next(Tab, Key) ->
          Record :: tuple().
 ec_match_object(Tab, Pat)
     when is_atom(Tab), Tab /= schema, is_tuple(Pat), tuple_size(Pat) > 2 ->
-    ec_rpc(Tab, mnesia_porset, remote_match_object, [Tab, Pat]);
+    ec_rpc(Tab, mnesia_pawset, remote_match_object, [Tab, Pat]);
 ec_match_object(Tab, Pat) ->
     mnesia:abort({bad_type, Tab, Pat}).
 

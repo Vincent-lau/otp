@@ -1,4 +1,4 @@
--module(mnesia_porset_test).
+-module(mnesia_pawset_test).
 
 -author('sl955@cam.ac.uk').
 
@@ -37,7 +37,7 @@ match_delete_ram(Config) when is_list(Config) ->
 match_delete(Config, Storage) ->
     Nodes = [_NodeA, NodeA1, NodeA2] = NodeNames = ?acquire_nodes(3, Config),
     Tab = match_delete,
-    Def = [{Storage, NodeNames}, {type, porbag}, {attributes, [k, v]}],
+    Def = [{Storage, NodeNames}, {type, pawbag}, {attributes, [k, v]}],
     ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
     Reader = fun() -> mnesia:read(Tab, a) end,
     Writer = fun(K, V) -> mnesia:write({Tab, K, V}) end,
@@ -65,7 +65,7 @@ match_object_ram(Config) when is_list(Config) ->
 match_object(Config, Storage) ->
     Nodes = [_NodeA, NodeA1, NodeA2] = NodeNames = ?acquire_nodes(3, Config),
     Tab = match_object,
-    Def = [{Storage, NodeNames}, {type, porbag}, {attributes, [k, v]}],
+    Def = [{Storage, NodeNames}, {type, pawbag}, {attributes, [k, v]}],
     ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
     Reader = fun() -> mnesia:read(Tab, a) end,
     Writer = fun(K, V) -> mnesia:write({Tab, K, V}) end,
@@ -101,7 +101,7 @@ stable_remove_ts(suite) ->
 stable_remove_ts(Config) when is_list(Config) ->
     Nodes = [NodeA, NodeA1, NodeA2]= ?acquire_nodes(3, Config),
     Tab = stable,
-    Def = [{ram_copies, Nodes}, {type, porset}, {attributes, [k, v]}],
+    Def = [{ram_copies, Nodes}, {type, pawset}, {attributes, [k, v]}],
     ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
     ?match(ok, mnesia:activity(sync_ec, fun() -> mnesia:write({Tab, 1, a}) end)),
     spawn(NodeA1, mnesia, sync_ec, [fun() -> mnesia:write({Tab, 2, a}) end]),

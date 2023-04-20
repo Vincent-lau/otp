@@ -40,7 +40,7 @@ MODULES= \
 	mnesia_nice_coverage_test \
 	mnesia_ec_test \
 	mnesia_causal_test \
-	mnesia_porset_test \
+	mnesia_pawset_test \
 	mnesia_evil_coverage_test \
 	mnesia_evil_backup \
 	mnesia_trans_access_test \

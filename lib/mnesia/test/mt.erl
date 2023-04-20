@@ -90,8 +90,8 @@ alias(medium) ->
     {mnesia_SUITE, medium};
 alias(nice) ->
     mnesia_nice_coverage_test;
-alias(porset) ->
-    mnesia_porset_test;
+alias(pawset) ->
+    mnesia_pawset_test;
 alias(recover) ->
     mnesia_recover_test;
 alias(recovery) ->

@@ -36,7 +36,7 @@ empty_final_buffer_ram(Config) when is_list(Config) ->
 empty_final_buffer(Config, Storage) ->
     Nodes = [_NodeA, NodeA1, NodeA2] = NodeNames = ?acquire_nodes(3, Config),
     Tab = empty_final_buffer,
-    Def = [{Storage, NodeNames}, {type, porset}, {attributes, [k, v]}],
+    Def = [{Storage, NodeNames}, {type, pawset}, {attributes, [k, v]}],
     ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
 
     Writer = fun(K, V) -> mnesia:write({Tab, K, V}) end,
@@ -62,7 +62,7 @@ causal_stability(suite) ->
 causal_stability(Config) when is_list(Config) ->
     Nodes = [NodeA, NodeA1, NodeA2] = ?acquire_nodes(3, Config),
     Tab = causal_stability,
-    Def = [{ram_copies, Nodes}, {type, porset}, {attributes, [k, v]}],
+    Def = [{ram_copies, Nodes}, {type, pawset}, {attributes, [k, v]}],
     ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
     ?match(ok, mnesia:activity(sync_ec, fun() -> mnesia:write({Tab, 1, a}) end)),
     spawn(NodeA1, mnesia, sync_ec, [fun() -> mnesia:write({Tab, 2, a}) end]),
@@ -80,7 +80,7 @@ causal_stable_receiver(suite) ->
 causal_stable_receiver(Config) when is_list(Config) ->
     Nodes = [NodeA, NodeA1, NodeA2] = ?acquire_nodes(3, Config),
     Tab = causal_stable_receiver,
-    Def = [{ram_copies, Nodes}, {type, porset}, {attributes, [k, v]}],
+    Def = [{ram_copies, Nodes}, {type, pawset}, {attributes, [k, v]}],
     ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
     mnesia_causal:register_stabiliser(self()),
     ?match(ok, mnesia:activity(sync_ec, fun() -> mnesia:write({Tab, 1, a}) end)),

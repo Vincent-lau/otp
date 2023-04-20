@@ -1,4 +1,4 @@
--module(mnesia_porset).
+-module(mnesia_pawset).
 
 -include("mnesia.hrl").
 
@@ -7,6 +7,7 @@
 -export([mktab/2, unsafe_mktab/2]).
 -export([remote_match_object/2]).
 -export([spawn_stabiliser/0]).
+-export([reify/3]).
 
 -type op() :: write | delete.
 -type val() :: any().
@@ -26,18 +27,18 @@ val(Var) ->
     end.
 
 mktab(Tab, [{keypos, 2}, public, named_table, Type | EtsOpts])
-    when Type =:= porset orelse Type =:= porbag ->
+    when Type =:= pawset orelse Type =:= pawbag ->
     Args1 = [{keypos, 2}, public, named_table, bag | EtsOpts],
-    {Tab1, _Tab2} = porset_name(Tab),
+    {Tab1, _Tab2} = pawset_name(Tab),
     mnesia_monitor:mktab(Tab1, Args1).
 
 unsafe_mktab(Tab, [{keypos, 2}, public, named_table, Type | EtsOpts])
-    when Type =:= porset orelse Type =:= porbag ->
+    when Type =:= pawset orelse Type =:= pawbag ->
     Args1 = [{keypos, 2}, public, named_table, bag | EtsOpts],
-    {Tab1, _Tab2} = porset_name(Tab),
+    {Tab1, _Tab2} = pawset_name(Tab),
     mnesia_monitor:unsafe_mktab(Tab1, Args1).
 
-porset_name(Tab) ->
+pawset_name(Tab) ->
     {list_to_atom(atom_to_list(Tab)), list_to_atom(atom_to_list(Tab) ++ "_s")}.
 
 %%==================== writes ====================
@@ -116,9 +117,9 @@ db_all_keys(Tab) when is_atom(Tab), Tab /= schema ->
     Pat = setelement(2, Pat0, '$1'),
     Keys = db_select(Tab, [{Pat, [], ['$1']}]),
     case val({Tab, setorbag}) of
-        porbag ->
+        pawbag ->
             mnesia_lib:uniq(Keys);
-        porset ->
+        pawset ->
             Keys;
         Other ->
             error({incorrect_ec_table_type, Other})
@@ -159,10 +160,10 @@ db_match_object(Tab, Pat0) ->
     Pat = pat_pad(Pat0, write),
     Res = mnesia_lib:db_match_object(Tab, Pat),
     case val({Tab, setorbag}) of
-        porset ->
+        pawset ->
             Res1 = clear_meta_for_user(Res),
             uniq(Tab, Res1);
-        porbag ->
+        pawbag ->
             clear_meta_for_user(Res);
         Other ->
             error({bad_val, Other})
@@ -196,16 +197,22 @@ clear_meta_for_user(Tups) ->
 
 uniq(Tab, Res) ->
     case val({Tab, setorbag}) of
-        porset ->
+        pawset ->
             Res1 = mnesia_lib:uniq(Res),
             resolve_cc_add(Res1);
-        porbag ->
+        pawbag ->
             Res;
         Other ->
             error({bad_val, Other})
     end.
 
-%%% ==========pure op-based orset implementation==========
+%%% ==========pure op-based awset implementation==========
+
+% -spec reify(storage(), mnesia:table(), element()) -> ok.
+% reify(Storage, Tab, Ele) ->
+%     io:format("reifying ~p~n", [Ele]),
+%     remove_obsolete(Storage, Tab, Ele).
+
 
 %% removes obsolete elements
 %% @returns whether this element should be added
@@ -288,13 +295,13 @@ causal_stabiliser(AccTs) ->
         stabilise ->
             % TODO checking all tables not might be a good way
             Tables = mnesia:system_info(tables),
-            Porsets =
+            pawsets =
                 lists:filter(fun(Tab) ->
                                 Type = mnesia_monitor:get_env({Tab, setorbag}),
-                                Type =:= porset orelse Type =:= porbag
+                                Type =:= pawset orelse Type =:= pawbag
                              end,
                              Tables),
-            lists:foreach(fun(Tab) -> stablise(Tab, AccTs) end, Porsets),
+            lists:foreach(fun(Tab) -> stablise(Tab, AccTs) end, pawsets),
             erlang:send_after(stabiliser_interval(), self(), stabilise),
             causal_stabiliser([]);
         Unexpected ->
@@ -371,9 +378,9 @@ obsolete(_Tab, {_Ts1, {delete, _V1}}, _X) ->
 -spec equals(mnesia:table(), tuple(), tuple()) -> boolean().
 equals(Tab, V1, V2) ->
     case val({Tab, setorbag}) of
-        porset ->
+        pawset ->
             element(key_pos(), V1) =:= element(key_pos(), V2);
-        porbag ->
+        pawbag ->
             V1 =:= V2;
         Other ->
             error({bad_val, Other})

@@ -51,7 +51,7 @@ sync_ec_rw_ram(Config) when is_list(Config) ->
 ec_rw(Config, Storage) ->
     [_NodeA, NodeA1, NodeA2] = NodeNames = ?acquire_nodes(3, Config),
     Tab = ec_rw,
-    Def = [{Storage, NodeNames}, {type, porset}, {attributes, [k, v]}],
+    Def = [{Storage, NodeNames}, {type, pawset}, {attributes, [k, v]}],
     Kind = mnesia_test_lib:lookup_config(kind, Config),
     ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
 
@@ -79,7 +79,7 @@ ec_rwd(Config, Storage) ->
     Nodes = [_NodeA, NodeA1, NodeA2] = ?acquire_nodes(3, Config),
     Tab = ec_rwd,
     Kind = mnesia_test_lib:lookup_config(kind, Config),
-    Def = [{Storage, Nodes}, {type, porset}, {attributes, [k, v]}],
+    Def = [{Storage, Nodes}, {type, pawset}, {attributes, [k, v]}],
     ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
     Writer = fun(K, V) -> mnesia:write({Tab, K, V}) end,
     Deleter = fun(K) -> mnesia:delete({Tab, K}) end,
@@ -125,7 +125,7 @@ ec_rw_compare_dirty(Config, Storage) ->
     Nodes = [_NodeA, NodeA1, NodeA2] = ?acquire_nodes(3, Config),
     Tab1 = ec_rw,
     Tab2 = dirty_rw,
-    Def1 = [{Storage, Nodes}, {type, porset}, {attributes, [k, v]}],
+    Def1 = [{Storage, Nodes}, {type, pawset}, {attributes, [k, v]}],
     Def2 = [{Storage, Nodes}, {attributes, [k, v]}],
     Kind = mnesia_test_lib:lookup_config(kind, Config),
     ?match({atomic, ok}, mnesia:create_table(Tab1, Def1)),
@@ -188,7 +188,7 @@ ec_write_block(Config, Storage) ->
     [NodeA, NodeA1, NodeA2] = NodeNames = ?acquire_nodes(3, Config),
     timer:sleep(500),
     Tab = ec_write_block,
-    Def = [{Storage, NodeNames}, {type, porset}, {attributes, [k, v]}],
+    Def = [{Storage, NodeNames}, {type, pawset}, {attributes, [k, v]}],
     ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
 
     Reader = fun(K) -> mnesia:read(Tab, K) end,
@@ -224,7 +224,7 @@ ec_delete_block(Config, Storage) ->
     [NodeA, NodeA1, NodeA2] = NodeNames = ?acquire_nodes(3, Config),
     timer:sleep(500),
     Tab = ec_delete_block,
-    Def = [{Storage, NodeNames}, {type, porset}, {attributes, [k, v]}],
+    Def = [{Storage, NodeNames}, {type, pawset}, {attributes, [k, v]}],
     ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
 
     Reader = fun(K) -> mnesia:read(Tab, K) end,
@@ -268,7 +268,7 @@ ec_rwd_block(Config, Storage) ->
     [NodeA, NodeA1, NodeA2] = NodeNames = ?acquire_nodes(3, Config),
     timer:sleep(500),
     Tab = ec_rwd_block,
-    Def = [{Storage, NodeNames}, {type, porset}, {attributes, [k, v]}],
+    Def = [{Storage, NodeNames}, {type, pawset}, {attributes, [k, v]}],
     ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
 
     Reader = fun() -> mnesia:read(Tab, a) end,
@@ -305,7 +305,7 @@ ec_block_40keys_ram(Config) ->
 ec_block_40keys(Config, Storage) ->
     Nodes = [_NodeA, NodeA1, NodeA2] = ?acquire_nodes(3, Config),
     Tab = ec_block_40keys,
-    Def = [{Storage, Nodes}, {type, porset}, {attributes, [k, v]}],
+    Def = [{Storage, Nodes}, {type, pawset}, {attributes, [k, v]}],
     ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
     Writer = fun(K, V) -> mnesia:write({Tab, K, V}) end,
     Deleter = fun(K) -> mnesia:delete({Tab, K}) end,

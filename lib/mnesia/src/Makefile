@@ -65,7 +65,7 @@ MODULES= \
 	mnesia_locker \
 	mnesia_log \
 	mnesia_monitor \
-	mnesia_porset \
+	mnesia_pawset \
 	mnesia_recover \
 	mnesia_registry \
 	mnesia_rpc \

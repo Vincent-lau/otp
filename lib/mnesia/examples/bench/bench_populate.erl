@@ -77,7 +77,7 @@ create_tables(C) when
     GroupDef =
         [{C#config.storage_type, C#config.table_nodes},
          {attributes, record_info(fields, group)},
-         {type, porset}],
+         {type, pawset}],
     ?APPLY(mnesia, create_table, [group, GroupDef]),
 
     %% Create suffix table
@@ -94,28 +94,28 @@ create_tables(C) when
         [{FragStorage, C#config.n_replicas},
          {node_pool, C#config.table_nodes},
          {n_fragments, C#config.n_fragments}],
-    SuffixDef = [{frag_properties, FragProps}, {type, porset}],
+    SuffixDef = [{frag_properties, FragProps}, {type, pawset}],
     ?APPLY(mnesia, create_table, [suffix, SuffixDef]),
 
     %% Create subscriber table
     SubscriberDef =
         [{frag_properties, [{foreign_key, {suffix, #subscriber.suffix}} | FragProps]},
          {attributes, record_info(fields, subscriber)},
-         {type, porset}],
+         {type, pawset}],
     ?APPLY(mnesia, create_table, [subscriber, SubscriberDef]),
 
     %% Create session table
     SessionDef =
         [{frag_properties, [{foreign_key, {suffix, #session.suffix}} | FragProps]},
          {attributes, record_info(fields, session)},
-         {type, porset}],
+         {type, pawset}],
     ?APPLY(mnesia, create_table, [session, SessionDef]),
 
     %% Create server table
     ServerDef =
         [{frag_properties, [{foreign_key, {suffix, #server.suffix}} | FragProps]},
          {attributes, record_info(fields, server)},
-         {type, porset}],
+         {type, pawset}],
     ?APPLY(mnesia, create_table, [server, ServerDef]);
 create_tables(C) ->
     ?d("    Delete old tables...~n", []),
