@@ -17,7 +17,9 @@
 
 -import(mnesia_lib, [important/2, dbg_out/2, verbose/2, warning/2]).
 
-stabiliser_interval() -> 1000000.
+stabiliser_interval() ->
+    1000000.
+
 val(Var) ->
     case ?catch_val_and_stack(Var) of
         {'EXIT', Stacktrace} ->
@@ -48,7 +50,7 @@ effect(Storage, Tab, Tup) ->
     case causal_compact(Storage, Tab, obj2ele(Tup)) of
         true ->
             dbg_out("not redundant, inserting ~p into ~p~n", [Tup, Tab]),
-            mnesia_lib:db_put(Storage, Tab, Tup),
+            mnesia_lib:db_put(Storage, Tab, remove_op(Tup)),
             ok;
         false ->
             dbg_out("redundant", []),
@@ -56,7 +58,6 @@ effect(Storage, Tab, Tup) ->
     end.
 
 db_put(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
-    maybe_create_index(Tab, tuple_size(Obj) + 1),
     Ts = element(tuple_size(Obj), Obj),
     dbg_out("running my own insert function and table ~p with val ~p and "
             "ts ~p~n",
@@ -71,16 +72,6 @@ db_put(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
     end;
 db_put(_S, _T, Obj) ->
     error("bad tuple ~p, no ts at the end~n", [Obj]).
-
-% TODO this might impact performance
-maybe_create_index(Tab, Index) ->
-    Indices = val({Tab, index}),
-    case lists:member(Index, Indices) of
-        true ->
-            ok;
-        false ->
-            mnesia:add_table_index(Tab, Index)
-    end.
 
 db_erase(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
     Ts = element(tuple_size(Obj), Obj),
@@ -101,16 +92,9 @@ db_match_erase(Storage, Tab, Pat) ->
 
 db_get(Tab, Key) ->
     Tups = mnesia_lib:db_get(Tab, Key),
-    Res = [get_val_tup(Tup) || Tup <- Tups],
+    Res = [remove_ts(Tup) || Tup <- Tups],
     dbg_out("running my own lookup function on ~p, got ~p~n", [Tab, Res]),
     uniq(Tab, Res).
-
--spec resolve_cc_add([element()]) -> [element()].
-resolve_cc_add(Res) when length(Res) =< 1 ->
-    Res;
-resolve_cc_add(Res) ->
-    dbg_out("selecting minimum element from ~p to resolve concurrent addition~n", [Res]),
-    [lists:min(Res)].
 
 db_all_keys(Tab) when is_atom(Tab), Tab /= schema ->
     Pat0 = val({Tab, wild_pattern}),
@@ -125,46 +109,16 @@ db_all_keys(Tab) when is_atom(Tab), Tab /= schema ->
             error({incorrect_ec_table_type, Other})
     end.
 
-remote_match_object(Tab, Pat) ->
-    Key = element(2, Pat),
-    case mnesia:has_var(Key) of
-        false ->
-            db_match_object(Tab, Pat);
-        true ->
-            PosList = regular_indexes(Tab),
-            remote_match_object(Tab, Pat, PosList)
-    end.
-
-remote_match_object(Tab, Pat, [Pos | Tail]) when Pos =< tuple_size(Pat) ->
-    IxKey = element(Pos, Pat),
-    case mnesia:has_var(IxKey) of
-        false ->
-            % TODO maybe a good idea to do filtermap afterwards
-            % benchmark to see
-            Pat1 = pat_pad(Pat, write),
-            mnesia_index:dirty_match_object(Tab, Pat1, Pos);
-        true ->
-            remote_match_object(Tab, Pat, Tail)
-    end;
-remote_match_object(Tab, Pat, []) ->
-    db_match_object(Tab, Pat);
-remote_match_object(Tab, Pat, _PosList) ->
-    mnesia:abort({bad_type, Tab, Pat}).
-
-regular_indexes(Tab) ->
-    PosList = val({Tab, index}),
-    [P || P <- PosList, is_integer(P)].
-
 db_match_object(Tab, Pat0) ->
     dbg_out("running my own match object function on ~p~n", [Tab]),
-    Pat = pat_pad(Pat0, write),
+    Pat = wild_ts(Pat0),
     Res = mnesia_lib:db_match_object(Tab, Pat),
     case val({Tab, setorbag}) of
         pawset ->
-            Res1 = clear_meta_for_user(Res),
+            Res1 = [remove_ts(Tup) || Tup <- Res],
             uniq(Tab, Res1);
         pawbag ->
-            clear_meta_for_user(Res);
+            [remove_ts(Tup) || Tup <- Res];
         Other ->
             error({bad_val, Other})
     end.
@@ -186,14 +140,10 @@ db_prev_key(Tab, Key) ->
     mnesia_lib:db_prev_key(Tab, Key).
 
 db_select(Tab, Spec) ->
-    Spec1 =
-        [{pat_pad(MatchHead, write), Guards, Results} || {MatchHead, Guards, Results} <- Spec],
+    Spec1 = [{wild_ts(MatchHead), Guards, Results} || {MatchHead, Guards, Results} <- Spec],
     Res = mnesia_lib:db_select(Tab, Spec1),
     dbg_out("running my own select function on ~p with spec ~p got ~p", [Tab, Spec, Res]),
     Res.
-
-clear_meta_for_user(Tups) ->
-    [get_val_tup(Tup) || Tup <- Tups].
 
 uniq(Tab, Res) ->
     case val({Tab, setorbag}) of
@@ -206,15 +156,50 @@ uniq(Tab, Res) ->
             error({bad_val, Other})
     end.
 
+-spec resolve_cc_add([element()]) -> [element()].
+resolve_cc_add(Res) when length(Res) =< 1 ->
+    Res;
+resolve_cc_add(Res) ->
+    dbg_out("selecting minimum element from ~p to resolve concurrent addition~n", [Res]),
+    [lists:min(Res)].
+
+remote_match_object(Tab, Pat) ->
+    Key = element(2, Pat),
+    case mnesia:has_var(Key) of
+        false ->
+            db_match_object(Tab, Pat);
+        true ->
+            PosList = regular_indexes(Tab),
+            remote_match_object(Tab, Pat, PosList)
+    end.
+
+remote_match_object(Tab, Pat, [Pos | Tail]) when Pos =< tuple_size(Pat) ->
+    IxKey = element(Pos, Pat),
+    case mnesia:has_var(IxKey) of
+        false ->
+            % TODO maybe a good idea to do filtermap afterwards
+            % benchmark to see
+            Pat1 = wild_ts(Pat),
+            mnesia_index:dirty_match_object(Tab, Pat1, Pos);
+        true ->
+            remote_match_object(Tab, Pat, Tail)
+    end;
+remote_match_object(Tab, Pat, []) ->
+    db_match_object(Tab, Pat);
+remote_match_object(Tab, Pat, _PosList) ->
+    mnesia:abort({bad_type, Tab, Pat}).
+
+regular_indexes(Tab) ->
+    PosList = val({Tab, index}),
+    [P || P <- PosList, is_integer(P)].
+
 %%% ==========pure op-based awset implementation==========
 
-% -spec reify(storage(), mnesia:table(), element()) -> ok.
-% reify(Storage, Tab, Ele) ->
-%     io:format("reifying ~p~n", [Ele]),
-%     remove_obsolete(Storage, Tab, Ele).
+-spec reify(storage(), mnesia:table(), element()) -> ok.
+reify(Storage, Tab, Ele) ->
+    io:format("reifying ~p~n", [Ele]),
+    remove_obsolete(Storage, Tab, Ele).
 
-
-%% removes obsolete elements
 %% @returns whether this element should be added
 -spec causal_compact(storage(), mnesia:table(), element()) -> boolean().
 causal_compact(Storage, Tab, Ele) ->
@@ -262,7 +247,7 @@ redundant(_Storage, _Tab, {_Ts, {delete, _Val}}) ->
 redundant(Storage, Tab, Ele) ->
     dbg_out("checking redundancy~n", []),
     Key = get_val_key(get_val_ele(Ele)),
-    Tups = mnesia_lib:db_get(Storage, Tab, Key),
+    Tups = [add_op(Tup, write) || Tup <- mnesia_lib:db_get(Storage, Tab, Key)],
     dbg_out("found ~p~n", [Tups]),
     Eles2 = lists:map(fun obj2ele/1, Tups),
     dbg_out("generated ~p~n", [Eles2]),
@@ -276,9 +261,11 @@ remove_obsolete(Storage, Tab, Ele) ->
         [] ->
             ok;
         Tups when length(Tups) > 0 ->
-            Keep = lists:filter(fun(Tup) -> not obsolete(Tab, obj2ele(Tup), Ele) end, Tups),
+            Tups2 = [add_op(Tup, write) || Tup <- Tups],
+            Keep = lists:filter(fun(Tup) -> not obsolete(Tab, obj2ele(Tup), Ele) end, Tups2),
+            Keep2 = [remove_op(Tup) || Tup <- Keep],
             mnesia_lib:db_erase(Storage, Tab, Key),
-            mnesia_lib:db_put(Storage, Tab, Keep),
+            mnesia_lib:db_put(Storage, Tab, Keep2),
             ok
     end.
 
@@ -308,22 +295,20 @@ causal_stabiliser(AccTs) ->
             error({unexpected, Unexpected})
     end.
 
-
 stablise(_Tab, []) ->
     dbg_out("no stable time~n", []),
     ok;
 stablise(Tab, [T | Ts]) ->
     case find_by_ts(Tab, T) of
         [] ->
-           ok;
+            ok;
         Tuples ->
             io:format("stablising ~p with ts ~p~n", [Tuples, T]),
-            Res2 = [set_ts(Tup, mnesia_causal:bot()) || Tup <- Tuples],
+            Res2 = [set_ts(Tup, mnesia_causal:bot(), tuple_size(Tup)) || Tup <- Tuples],
             mnesia_lib:db_put(Tab, Res2),
             [mnesia_lib:db_erase(Tab, element(key_pos(), Tup)) || Tup <- Tuples]
-        end,
+    end,
     stablise(Tab, Ts).
-
 
 % -spec stablise(tuple()) -> {boolean(), tuple()}.
 % stablise(Tups) ->
@@ -343,11 +328,6 @@ find_by_ts(Tab, Ts) ->
     Pat2 = erlang:append_element(Pat, Ts),
     Pat3 = erlang:append_element(Pat2, '_'),
     db_select(Tab, [{Pat3, [], [Ts]}]).
-
-
-
-
-%%% Helper
 
 key_pos() ->
     2.
@@ -410,27 +390,28 @@ get_val_key(V) ->
 add_op(Obj, Op) ->
     erlang:append_element(Obj, Op).
 
+remove_op(Obj) ->
+    erlang:delete_element(tuple_size(Obj), Obj).
+
 get_op(Obj) ->
     element(tuple_size(Obj), Obj).
 
 get_ts(Obj) ->
     element(tuple_size(Obj) - 1, Obj).
 
-set_ts(Obj, Ts) ->
-    setelement(tuple_size(Obj) - 1, Obj, Ts).
+% set_ts(Obj, Ts) ->
+%     setelement(tuple_size(Obj) - 1, Obj, Ts).
 
-% -spec add_meta(tuple(), ts(), op()) -> tuple().
-% add_meta(Obj, Ts, Op) ->
-%     add_op(add_ts(Obj, Ts), Op).
+set_ts(Obj, Ts, Idx) ->
+    setelement(Idx, Obj, Ts).
+
+remove_ts(Obj) ->
+    erlang:delete_element(tuple_size(Obj), Obj).
 
 -spec delete_meta(tuple()) -> tuple().
 delete_meta(Obj) ->
     Last = tuple_size(Obj),
     erlang:delete_element(Last - 1, erlang:delete_element(Last, Obj)).
 
-% tup_is_write(Tup) ->
-%     get_op(Tup) =:= write.
-
-pat_pad(Pat, Op) ->
-    erlang:append_element(
-        erlang:append_element(Pat, '_'), Op).
+wild_ts(Pat) ->
+    erlang:append_element(Pat, '_').
