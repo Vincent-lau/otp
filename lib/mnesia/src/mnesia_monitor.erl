@@ -102,11 +102,17 @@ mnesia_down(From, Node) ->
 mktab(Tab, Args = [_, _, _, Type | _]) 
     when Type =:= pawset orelse Type =:= pawbag ->
     mnesia_pawset:mktab(Tab, Args);
+mktab(Tab, Args = [_, _, _, Type | _]) 
+    when Type =:= prwset orelse Type =:= prwbag ->
+    mnesia_prwset:mktab(Tab, Args);
 mktab(Tab, Args) ->
     unsafe_call({mktab, Tab, Args}).
 unsafe_mktab(Tab, [_, _, _, Type | _] = Args) 
     when Type =:= pawset orelse Type =:= pawbag ->
     mnesia_pawset:unsafe_mktab(Tab, Args);
+unsafe_mktab(Tab, [_, _, _, Type | _] = Args) 
+    when Type =:= prwset orelse Type =:= prwbag ->
+    mnesia_prwset:unsafe_mktab(Tab, Args);
 unsafe_mktab(Tab, Args) ->
     unsafe_call({unsafe_mktab, Tab, Args}).
 

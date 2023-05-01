@@ -7,15 +7,13 @@
 -export([lock/4, write/5, delete/5, delete_object/5, read/5, match_object/5, all_keys/4,
          first/3, last/3, prev/4, next/4, index_match_object/6, index_read/6, table_info/4,
          select/5]).
--export([receive_msg/4]).
 -export([repair_inconsistency/3]).
 -export([start/0, init/1]).
 
 -compile([nowarn_unused_vars]).
 
-% -behaviour(mnesia_access).
-
 -define(ACKER, mnesia_ec_ack).
+-define(CRDTMOD, mnesia_pawset).
 
 -record(prep,
         {protocol = async_ec,
@@ -34,7 +32,8 @@
          stabiliser,
          acker,
          blocked_tabs = [],
-         ec_queue = []}).
+         ec_queue = [],
+         reify = false}).
 -record(ack_state, {buffer :: #{node() => sets:set()}}).
 
 val(Var) ->
@@ -53,7 +52,7 @@ init(Parent) ->
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     mnesia_monitor:set_env(causal, true),
-    {SPid, SRef} = mnesia_pawset:spawn_stabiliser(),
+    {SPid, SRef} = ?CRDTMOD:spawn_stabiliser(no),
     {APid, ARef} = spawn_acker(no),
     case val(debug) of
         Debug when Debug /= debug, Debug /= trace ->
@@ -64,7 +63,8 @@ init(Parent) ->
     proc_lib:init_ack(Parent, {ok, self()}),
     doit_loop(#state{stabiliser = {SPid, SRef},
                      acker = {APid, ARef},
-                     supervisor = Parent}).
+                     supervisor = Parent,
+                     reify = false}).
 
 spawn_acker(no) ->
     {undefined, undefined};
@@ -74,14 +74,17 @@ spawn_acker(yes) ->
     register(?ACKER, APid),
     {APid, ARef}.
 
-doit_loop(#state{stabiliser = {SPid, SRef}, acker = {APid, ARef}} = State) ->
+doit_loop(#state{stabiliser = {SPid, SRef},
+                 acker = {APid, ARef},
+                 reify = Reify} =
+              State) ->
     receive
         {From, {async_ec, Tid, Commit, Tab}} ->
             dbg_out("received async_ec: ~p~n", [{From, {async_ec, Tid, Commit, Tab}}]),
             send_ack(Commit),
             case lists:member(Tab, State#state.blocked_tabs) of
                 false ->
-                    spawn(mnesia_ec, receive_msg, [Tid, Commit, Tab, {rcv, async}]),
+                    spawn(fun() -> receive_msg(Tid, Commit, Tab, {rcv, async}, Reify) end),
                     doit_loop(State);
                 true ->
                     Item = {async_ec, Tid, mnesia_tm:new_cr_format(Commit), Tab},
@@ -92,7 +95,7 @@ doit_loop(#state{stabiliser = {SPid, SRef}, acker = {APid, ARef}} = State) ->
             case lists:member(Tab, State#state.blocked_tabs) of
                 false ->
                     dbg_out("received sync_ec: ~p~n", [{From, {sync_ec, Tid, Commit, Tab}}]),
-                    mnesia_ec:receive_msg(Tid, Commit, Tab, {rcv, {sync, From}}),
+                    receive_msg(Tid, Commit, Tab, {rcv, {sync, From}}, false),
                     doit_loop(State);
                 true ->
                     Item = {sync_ec, From, Tid, mnesia_tm:new_cr_format(Commit), Tab},
@@ -155,9 +158,23 @@ match_object({SyncMode, _Pid} = Tid, Ts, Tab, Pat, _LockKind)
 match_object(Tid, Ts, Tab, Pat, LockKind) ->
     mneisa:match_object(Tid, Ts, Tab, Pat, LockKind).
 
+
+-spec get_crdt_module(mnesia:table()) -> module().
+get_crdt_module(Tab) ->
+    case val({Tab, setorbag}) of
+        AWSet when AWSet =:= pawset orelse AWSet =:= pawbag ->
+            mnesia_pawset;
+        RWSet when RWSet =:= prwset orelse RWSet =:= prwbag ->
+            mnesia_prwset;
+        _ ->
+            error({bad_ec_tab_type, Tab})
+        end.
+
+
 all_keys({SyncMode, _Pid} = Tid, _Ts, Tab, _LockKind)
     when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
-    mnesia_pawset:db_all_keys(Tab);
+    Mod = get_crdt_module(Tab),
+    Mod:db_all_keys(Tab);
 all_keys(_Tid, _Ts, Tab, _LockKind) ->
     mnesia:abort({bad_type, Tab}).
 
@@ -393,18 +410,18 @@ add_time({Oid, Val, Op}, Ts) ->
 add_time({ExtInfo, {Oid, Val, Op}}, Ts) ->
     {ExtInfo, {Oid, erlang:append_element(Val, Ts), Op}}.
 
-receive_msg(Tid, Commit, Tab, local) ->
+receive_msg(Tid, Commit, Tab, local, _Reify) ->
     mnesia_causal:deliver_one(Commit),
     do_ec(Tid, Commit);
-receive_msg(Tid, Commit, Tab, {rcv, async}) ->
-    % mnesia_pawset:reify(Tid, Commit, Tab),
+receive_msg(Tid, Commit, Tab, {rcv, async}, Reify) ->
+    reify(Tid, Commit, Tab, Reify),
     Deliverable = mnesia_causal:rcv_msg(Tid, Commit, Tab),
     dbg_out("found async_ec devliverable commits: ~p~n", [Deliverable]),
     lists:foreach(fun({Tid1, Commit1, Tab1}) ->
                      do_async_ec(Tid1, mnesia_tm:new_cr_format(Commit1), Tab1)
                   end,
                   Deliverable);
-receive_msg(Tid, Commit, Tab, {rcv, {sync, From}}) ->
+receive_msg(Tid, Commit, Tab, {rcv, {sync, From}}, Reify) ->
     Deliverable = mnesia_causal:rcv_msg(Tid, Commit, Tab, From),
     dbg_out("found sync_ec devliverable commits: ~p~n", [Deliverable]),
     lists:foreach(fun({Tid1, Commit1 = #commit{sender = Sender}, Tab1, From1}) ->
@@ -417,7 +434,7 @@ sync_send_ec(Tid, [Head | Tail], Tab, WaitFor) ->
     if Node == node() ->
            % if the node we want to deliver to is local, we deliver it directly
            {WF, _} = sync_send_ec(Tid, Tail, Tab, WaitFor),
-           Res = receive_msg(Tid, Head, Tab, local),
+           Res = receive_msg(Tid, Head, Tab, local, false),
            {WF, Res};
        true ->
            % otherwise we need to send it and wait for ack
@@ -437,7 +454,7 @@ async_send_ec(Tid, [Head | Tail], Tab, ReadNode, WaitFor, Res) ->
     dbg_out("async_send_ec Nodes: ~p~n", [[Head | Tail]]),
     Node = Head#commit.node,
     if ReadNode == Node, Node == node() ->
-           NewRes = receive_msg(Tid, Head, Tab, local),
+           NewRes = receive_msg(Tid, Head, Tab, local, false),
            async_send_ec(Tid, Tail, Tab, ReadNode, WaitFor, NewRes);
        ReadNode == Node ->
            % if the readnode is not local, we need to send it to the readnode and
@@ -579,6 +596,42 @@ do_ec(Tid, Commit) when Commit#commit.schema_ops == [] ->
     mnesia_log:log(Commit),
     do_commit(Tid, Commit).
 
+reify(_, _, _, false) ->
+    ok;
+reify(Tid, C, Tab, true) ->
+    R = [],
+    R2 = do_reify(Tid, ram_copies, C#commit.ram_copies, C#commit.ts, R),
+    R3 = do_reify(Tid, disc_copies,  C#commit.disc_copies, C#commit.ts, R2),
+    R4 = do_reify(Tid,  disc_only_copies,  C#commit.disc_only_copies, C#commit.ts, R3),
+    R5 = do_reify_ext(Tid,  C#commit.ext, C#commit.ts, R4).
+
+do_reify(Tid, Storage, [Op1 | Ops], Ts, OldRes) ->
+    Op = {{Tab, K}, Obj, _OpName} = do_update_ts(Storage, Op1, Ts),
+    Mod = get_crdt_module(Tab),
+    try Mod:reify(Storage, Tab, Obj) of
+        ok ->
+            do_reify(Tid, Storage, Ops, Ts, OldRes);
+        NewRes ->
+            do_reify(Tid, Storage, Ops, Ts, NewRes)
+    catch
+        _:Reason:ST ->
+            verbose("do_reify in ~w failed: ~tp -> {'EXIT', ~tp}~n", [Tid, Op, {Reason, ST}]),
+            do_reify(Tid, Storage, Ops, Ts, OldRes)
+    end;
+do_reify(_Tid, _Storage, [], Ts, Res) ->
+    Res.
+
+do_reify_ext(_Tid, [], Ts, OldRes) ->
+    OldRes;
+do_reify_ext(Tid, Ext, Ts, OldRes) ->
+    case lists:keyfind(ext_copies, 1, Ext) of
+        false ->
+            OldRes;
+        {_, Ops} ->
+            Do = fun({{ext, _, _} = Storage, Op}, R) -> do_reify(Tid, Storage, [Op], Ts, R) end,
+            lists:foldl(Do, OldRes, Ops)
+    end.
+
 %% do_commit(Tid, CommitRecord)
 do_commit(Tid, Bin) when is_binary(Bin) ->
     do_commit(Tid, binary_to_term(Bin));
@@ -633,13 +686,15 @@ do_update(_Tid, _Storage, [], Ts, Res) ->
 
 do_update_op(Tid, Storage, {{Tab, K}, Obj, write}) ->
     commit_write(?catch_val({Tab, commit_work}), Tid, Storage, Tab, K, Obj, undefined),
-    mnesia_pawset:db_put(Storage, Tab, Obj);
+    Mod = get_crdt_module(Tab),
+    Mod:db_put(Storage, Tab, Obj);
 do_update_op(Tid, Storage, {{Tab, K}, Obj, delete}) ->
     % note here parameter is Obj rather than Val, this is mostly better since we
     % can always extract the key from the object
     % we send Obj instead of Key for processing
     commit_delete(?catch_val({Tab, commit_work}), Tid, Storage, Tab, K, Obj, undefined),
-    mnesia_pawset:db_erase(Storage, Tab, Obj);
+    Mod = get_crdt_module(Tab),
+    Mod:db_erase(Storage, Tab, Obj);
 do_update_op(Tid, Storage, {{Tab, K}, {RecName, Incr}, update_counter}) ->
     {NewObj, OldObjs} =
         try
@@ -660,7 +715,8 @@ do_update_op(Tid, Storage, {{Tab, K}, {RecName, Incr}, update_counter}) ->
     element(3, NewObj);
 do_update_op(Tid, Storage, {{Tab, Key}, Obj, delete_object}) ->
     commit_del_object(?catch_val({Tab, commit_work}), Tid, Storage, Tab, Key, Obj),
-    mnesia_pawset:db_match_erase(Storage, Tab, Obj);
+    Mod = get_crdt_module(Tab),
+    Mod:db_match_erase(Storage, Tab, Obj);
 do_update_op(Tid, Storage, {{Tab, Key}, Obj, clear_table}) ->
     commit_clear(?catch_val({Tab, commit_work}), Tid, Storage, Tab, Key, Obj),
     mnesia_lib:db_match_erase(Storage, Tab, Obj).
@@ -785,22 +841,28 @@ do_ec_rpc(Tab, Node, M, F, Args) ->
     end.
 
 ec_read(Tab, Key) ->
-    mnesia_pawset:db_get(Tab, Key).
+    Mod = get_crdt_module(Tab),
+    Mod:db_get(Tab, Key).
 
 ec_select(Tab, Spec) ->
-    mnesia_pawset:db_select(Tab, Spec).
+    Mod = get_crdt_module(Tab),
+    Mod:db_select(Tab, Spec).
 
 ec_first(Tab) ->
-    mnesia_pawset:db_first(Tab).
+    Mod = get_crdt_module(Tab),
+    Mod:db_first(Tab).
 
 ec_last(Tab) ->
-    mnesia_pawset:db_last(Tab).
+    Mod = get_crdt_module(Tab),
+    Mod:db_last(Tab).
 
 ec_prev(Tab, Key) ->
-    mnesia_pawset:db_prev_key(Tab, Key).
+    Mod = get_crdt_module(Tab),
+    Mod:db_prev_key(Tab, Key).
 
 ec_next(Tab, Key) ->
-    mnesia_pawset:db_next_key(Tab, Key).
+    Mod = get_crdt_module(Tab),
+    Mod:db_next_key(Tab, Key).
 
 -spec ec_match_object(Tab, Pattern) -> [Record]
     when Tab :: mnesia:table(),
@@ -808,7 +870,8 @@ ec_next(Tab, Key) ->
          Record :: tuple().
 ec_match_object(Tab, Pat)
     when is_atom(Tab), Tab /= schema, is_tuple(Pat), tuple_size(Pat) > 2 ->
-    ec_rpc(Tab, mnesia_pawset, remote_match_object, [Tab, Pat]);
+    Mod = get_crdt_module(Tab),
+    ec_rpc(Tab, Mod, remote_match_object, [Tab, Pat]);
 ec_match_object(Tab, Pat) ->
     mnesia:abort({bad_type, Tab, Pat}).
 

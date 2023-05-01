@@ -1107,7 +1107,7 @@ assert_correct_cstruct(Cs) when is_record(Cs, cstruct) ->
     Tab = Cs#cstruct.name,
     verify(atom, mnesia_lib:etype(Tab), {bad_type, Tab}),
     Type = Cs#cstruct.type,
-    verify(true, lists:member(Type, [set, bag, ordered_set, pawset, pawbag]),
+    verify(true, lists:member(Type, [set, bag, ordered_set, pawset, pawbag, prwset, prwbag]),
 	   {bad_type, Tab, {type, Type}}),
 
     %% Currently ordered_set is not supported for disk_only_copies.

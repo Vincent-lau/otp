@@ -60,12 +60,13 @@ MODULES= \
 	mnesia_index \
 	mnesia_kernel_sup \
 	mnesia_late_loader \
-	mnesia_lib\
+	mnesia_lib \
 	mnesia_loader \
 	mnesia_locker \
 	mnesia_log \
 	mnesia_monitor \
 	mnesia_pawset \
+	mnesia_prwset \
 	mnesia_recover \
 	mnesia_registry \
 	mnesia_rpc \
