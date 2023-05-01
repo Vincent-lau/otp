@@ -247,7 +247,7 @@ slave_sup() ->
 
 port_proto_start(Host, Name) ->
     Debug = atom_to_list(mnesia:system_info(debug)),
-    Prog = "../../../bin/erl ",
+    Prog = "erl ",
     NewNode = list_to_atom(Name ++ "@" ++ Host),
     Args =
         "-mnesia debug "
