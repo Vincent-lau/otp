@@ -112,9 +112,9 @@ stable_remove_ts(Config) when is_list(Config) ->
     ?match(true,
            mnesia_causal:tcstable(#{NodeA => 1,
                                     NodeA1 => 0,
-                                    NodeA2 => 0})),
+                                    NodeA2 => 0}, NodeA)),
     timer:sleep(1000),
-    ?match([{Tab, 1, a, #{}, write}],
+    ?match([{Tab, 1, a, #{}}],
            lists:filter(fun(Tup) -> element(2, Tup) =:= 1 end, ets:tab2list(Tab))).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
