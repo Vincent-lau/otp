@@ -1,10 +1,10 @@
 -module(mnesia_causal).
 
 -export([start/0, get_ts/0, send_msg/0, rcv_msg/3, rcv_msg/4, compare_vclock/2,
-         deliver_one/1, tcstable/1]).
--export([init/1, handle_call/3, handle_cast/2]).
+         vclock_leq/2, deliver_one/1, tcstable/2]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 -export([get_buffered/0, get_mrd/0, new_clock/0, bot/0, is_bot/1, reset_with_nodes/1,
-         register_stabiliser/1]).
+         reg_stabiliser/1]).
 
 -include("mnesia.hrl").
 
@@ -22,11 +22,11 @@
          delivered :: vclock(),
          buffer :: [mmsg()],
          mrd :: #{node() => vclock()},
-         stable_ts :: vclock(),
-         stabiliser_pid :: pid()}).
+         stabiliser :: {pid(), reference()}}).
 -record(mmsg, {tid :: pid(), tab :: mnesia:table(), msg :: msg(), from :: pid()}).
 
 -type mmsg() :: #mmsg{}.
+-type mrd() :: #{node() => vclock()}.
 -type state() :: #state{}.
 
 %% Helper
@@ -105,13 +105,13 @@ rcv_msg(Tid, Commit, Tab, From) ->
 deliver_one(#commit{sender = Sender, ts = Ts}) ->
     gen_server:call(?MODULE, {deliver_one, Sender, Ts}).
 
--spec tcstable(vclock()) -> boolean().
-tcstable(Ts) ->
-    gen_server:call(?MODULE, {tcstable, Ts}).
+-spec tcstable(vclock(), node()) -> boolean().
+tcstable(Ts, Sender) ->
+    gen_server:call(?MODULE, {tcstable, Ts, Sender}).
 
--spec register_stabiliser(pid()) -> ok.
-register_stabiliser(ReceiverPid) ->
-    gen_server:cast(?MODULE, {register_stabiliser, ReceiverPid}).
+-spec reg_stabiliser(pid()) -> ok.
+reg_stabiliser(ReceiverPid) ->
+    gen_server:cast(?MODULE, {reg_stabiliser, ReceiverPid}).
 
 reset_with_nodes(Nodes) ->
     gen_server:call(?MODULE, {reset, Nodes}).
@@ -122,40 +122,40 @@ init([Nodes]) ->
      #state{send_seq = 0,
             delivered = new_clock(Nodes),
             buffer = [],
-            mrd = new_mrds(Nodes),
-            stable_ts = bot()}};
+            mrd = new_mrds(Nodes)}};
 init(_Args) ->
     {ok,
      #state{send_seq = 0,
             delivered = new_clock(),
             buffer = [],
-            mrd = new_mrds(),
-            stable_ts = bot()}}.
+            mrd = new_mrds()}}.
 
 handle_call(send_msg, _From, State = #state{delivered = Delivered, send_seq = SendSeq}) ->
     Deps = Delivered#{node() := SendSeq + 1},
     {reply, {node(), Deps}, State#state{send_seq = SendSeq + 1}};
 handle_call({deliver_one, Sender, Ts},
             _From,
-            State = #state{delivered = Delivered, mrd = MRD}) ->
+            State =
+                #state{delivered = Delivered,
+                       mrd = MRD,
+                       stabiliser = Stabiliser}) ->
     NewDelivered = increment(Sender, Delivered),
     MRD2 = update_mrd(MRD, Sender, Ts),
-    StableTs = send_stable_ts(State#state{mrd = MRD2}),
-    {reply,
-     ok,
-     State#state{delivered = NewDelivered,
-                 mrd = MRD2,
-                 stable_ts = StableTs}};
-handle_call({receive_msg, MM = #mmsg{}}, _From, State = #state{}) ->
+    send_ts(Stabiliser, Ts, Sender),
+    {reply, ok, State#state{delivered = NewDelivered, mrd = MRD2}};
+handle_call({receive_msg, MM = #mmsg{msg = #commit{sender = Sender, ts = Ts}}},
+            _From,
+            State = #state{stabiliser = Stabiliser}) ->
+    send_ts(Stabiliser, Ts, Sender),
     {NewState, Deliverable} = find_deliverable(MM, State),
     {reply, Deliverable, NewState};
-handle_call({tcstable, Ts}, _From, State = #state{mrd = MRD}) ->
+handle_call({tcstable, Ts, Sender}, _From, State = #state{mrd = MRD}) ->
     case Ts of
         #{} when map_size(Ts) == 0 ->
             {reply, true, State};
         Other when is_map(Other) ->
-            Res = lists:all(fun(VClock) -> vclock_leq(Ts, VClock) end, maps:values(MRD)),
-            dbg_out("tcstable: ~p ~p ~p ~n", [Res, Ts, MRD]),
+            Res = maps:get(Sender, Ts) =< low(MRD, Sender),
+            io:format("tcstable: ~p ~p ~p ~p~n", [Res, Ts, MRD, Sender]),
             {reply, Res, State}
     end;
 handle_call(get_buf, _From, #state{buffer = Buffer} = State) ->
@@ -164,12 +164,25 @@ handle_call(get_ts, _From, #state{delivered = D} = State) ->
     {reply, D, State};
 handle_call(get_mrd, _From, #state{mrd = MRD} = State) ->
     {reply, MRD, State};
-handle_call({reset, Nodes}, _From, #state{stabiliser_pid = StabiliserPid}) ->
+handle_call({reset, Nodes}, _From, #state{stabiliser = Stabiliser}) ->
     {ok, NewState} = init([Nodes]),
-    {reply, ok, NewState#state{stabiliser_pid = StabiliserPid}}.
+    {reply, ok, NewState#state{stabiliser = Stabiliser}}.
 
-handle_cast({register_stabiliser, ReceiverPid}, State) ->
-    {noreply, State#state{stabiliser_pid = ReceiverPid, stable_ts = bot()}}.
+handle_cast({reg_stabiliser, ReceiverPid}, State) ->
+    TMap =
+        maps:from_keys(
+            maps:keys(State#state.mrd), []),
+    {Pid, Ref} = spawn_monitor(fun() -> stable_ts_sender(ReceiverPid, TMap) end),
+    erlang:send_after(1000, Pid, periodic_check_stability),
+    {noreply, State#state{stabiliser = {Pid, Ref}}}.
+
+handle_info({'DOWN', Ref, process, Pid, Reason},
+            State = #state{stabiliser = {Pid, Ref}}) ->
+    warning("stabiliser process ~p died with reason ~p~n", [Pid, Reason]),
+    {noreply, State#state{stabiliser = undefined}};
+handle_info(Msg, State) ->
+    warning("unhandled message ~p~n", [Msg]),
+    {noreply, State}.
 
 %%% internal functions
 
@@ -190,11 +203,9 @@ find_deliverable(MM = #mmsg{msg = #commit{ts = Deps, sender = Sender}},
             dbg_out("input message ~p deliverable~n", [MM]),
             NewDelivered = increment(Sender, Delivered),
             MRD2 = update_mrd(MRD, Sender, Deps),
-            StableTs = send_stable_ts(State#state{mrd = MRD2}),
             do_find_deliverable(State#state{delivered = NewDelivered,
                                             buffer = Buffer,
-                                            mrd = MRD2,
-                                            stable_ts = StableTs},
+                                            mrd = MRD2},
                                 [MM]);
         false ->
             dbg_out("input message ~p not deliverable~n", [MM]),
@@ -216,9 +227,7 @@ do_find_deliverable(State = #state{delivered = Delivered, buffer = Buff}, Delive
                 lists:foldl(fun(#mmsg{msg = #commit{sender = Sender, ts = Ts}}, StateIn) ->
                                Dev2 = increment(Sender, StateIn#state.delivered),
                                MRD2 = update_mrd(StateIn#state.mrd, Sender, Ts),
-                               StateOut = StateIn#state{delivered = Dev2, mrd = MRD2},
-                               StableTs2 = send_stable_ts(StateOut),
-                               StateOut#state{stable_ts = StableTs2}
+                               StateIn#state{delivered = Dev2, mrd = MRD2}
                             end,
                             State,
                             Dev),
@@ -227,46 +236,97 @@ do_find_deliverable(State = #state{delivered = Delivered, buffer = Buff}, Delive
 
 -spec update_mrd(#{node() => vclock()}, node(), vclock()) -> #{node() => vclock()}.
 update_mrd(MRD, Sender, Ts) ->
-    NewTs = max_ts(maps:get(Sender, MRD), Ts),
-    MRD#{Sender := NewTs}.
+    MRD#{Sender := Ts}.
 
-max_ts(Ts1, Ts2) ->
-    case compare_vclock(Ts1, Ts2) of
-        Res when Res =:= gt orelse Res =:= cc ->
-            Ts1;
-        _ ->
-            Ts2
+% max_ts(Ts1, Ts2) ->
+%     case compare_vclock(Ts1, Ts2) of
+%         Res when Res =:= gt orelse Res =:= cc ->
+%             Ts1;
+%         _ ->
+%             Ts2
+%     end.
+
+% min_ts(Ts1, Ts2) ->
+%     case compare_vclock(Ts1, Ts2) of
+%         gt ->
+%             Ts2;
+%         _ ->
+%             Ts1
+%     end.
+
+-spec low(mrd(), node()) -> integer().
+low(Mrd, Node) ->
+    Values = maps:values(Mrd),
+    Lows = [maps:get(Node, VClock) || VClock <- Values],
+    lists:min(Lows).
+
+-spec stable_ts_sender(pid(), #{node() => [vclock()]}) -> ok.
+stable_ts_sender(To, TMap) ->
+    receive
+        {ts, T, Sender} ->
+            % case node() of
+            %     'bench1@vincent-pc' ->
+            %         io:format("received ts ~p from ~p~n", [T, Sender]);
+            %     _ ->
+            %         ok
+            % end,
+            % io:format("current tmap~p~n", [TMap]),
+            Ts = maps:get(Sender, TMap),
+            TMap2 = maps:put(Sender, [T | Ts], TMap),
+            stable_ts_sender(To, TMap2);
+        periodic_check_stability ->
+            case node() of
+                'bench2@vincent-pc' ->
+                    io:format("~p current tmap ~p~n mrd ~p~n",
+                              [node(), TMap, mnesia_causal:get_mrd()]);
+                _ ->
+                    ok
+            end,
+            TMap2 = maps:map(fun(Sender, Ts) -> find_send_stable(Ts, Sender, To) end, TMap),
+            erlang:send_after(1000, self(), periodic_check_stability),
+            stable_ts_sender(To, TMap2);
+        Unexpected ->
+            error({unexpected, Unexpected})
     end.
 
-min_ts(Ts1, Ts2) ->
-    case compare_vclock(Ts1, Ts2) of
-        gt ->
-            Ts2;
+%% @returns a list of vector clocks that are not stable, stable ones are sent
+-spec find_send_stable([vclock()], node(), pid()) -> [vclock()].
+find_send_stable(Ts, Sender, To) ->
+    {Stable, Unstable} = lists:partition(fun(T1) -> tcstable(T1, Sender) end, Ts),
+    [To ! {add_timestamp, T1} || T1 <- Stable],
+    case node() of
+        'bench2@vincent-pc' ->
+            io:format("send unstable stable ~p ~n", [Stable]);
         _ ->
-            Ts1
-    end.
+            ok
+    end,
+    Unstable.
 
--spec send_stable_ts(state()) -> ok.
-send_stable_ts(#state{mrd = MRD,
-                      stabiliser_pid = Pid,
-                      stable_ts = CurStableTs})
-    when is_pid(Pid) ->
-    StableTs =
-        maps:fold(fun(_Node, Ts, MinTs) -> min_ts(MinTs, Ts) end,
-                  element(2, hd(maps:to_list(MRD))),
-                  MRD),
-    dbg_out("stable ts ~p current ~p ~n mrd ~p~n", [StableTs, CurStableTs, MRD]),
-    case compare_vclock(StableTs, CurStableTs) of
-        Res when Res =/= eq ->
-            dbg_out("sending stable ts ~p~n", [StableTs]),
-            Pid ! {stable_ts, StableTs},
-            StableTs;
-        _ ->
-            % io:format("not sending stable ts ~p ~p~n", [StableTs, CurStableTs]),
-            CurStableTs
-    end;
-send_stable_ts(_State = #state{stable_ts = StableTs}) ->
-    StableTs.
+-spec send_ts({pid(), reference()}, vclock(), node()) -> ok.
+send_ts({Pid, _Ref}, T, Sender) when is_pid(Pid) ->
+    Pid ! {ts, T, Sender},
+
+    % io:format("sent ts ~p to ~p~n", [T, Sender]),
+    ok;
+send_ts(_Stabiliser, _T, _Sender) ->
+    ok.
+
+% -spec send_stable_ts(state()) -> ok.
+% send_stable_ts(#state{mrd = MRD,
+%                       stabiliser_pid = Pid,
+%                       stable_ts = CurStableTs})
+%     when is_pid(Pid) ->
+%     dbg_out("stable ts ~p current ~p ~n mrd ~p~n", [StableTs, CurStableTs, MRD]),
+%         Res when Res =/= eq ->
+%             dbg_out("sending stable ts ~p~n", [StableTs]),
+%             Pid ! {stable_ts, StableTs},
+%             StableTs;
+%         _ ->
+%             % io:format("not sending stable ts ~p ~p~n", [StableTs, CurStableTs]),
+%             CurStableTs
+%     end;
+% send_stable_ts(_State = #state{stable_ts = StableTs}) ->
+%     StableTs.
 
 %% @doc Deps is the vector clock of the event
 %% Delivered is the local vector clock
