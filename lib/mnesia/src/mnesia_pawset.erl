@@ -5,7 +5,7 @@
 -export([db_put/3, db_erase/3, db_get/2, db_first/1, db_last/1, db_next_key/2,
          db_select/2, db_prev_key/2, db_all_keys/1, db_match_erase/3]).
 -export([mktab/2, unsafe_mktab/2]).
--export([remote_match_object/2]).
+-export([remote_match_object/2, remote_ec_select/2]).
 -export([spawn_stabiliser/1]).
 -export([reify/3]).
 -export([index_match_object/3,index_read/3]).
@@ -27,6 +27,54 @@ val(Var) ->
             mnesia_lib:other_val(Var, Stacktrace);
         Value ->
             Value
+    end.
+
+
+is_dollar_digits(Var) ->
+    case atom_to_list(Var) of
+        [$$ | Digs] ->
+            is_digits(Digs);
+        _ ->
+            false
+    end.
+
+is_digits([Dig | Tail]) ->
+    if $0 =< Dig, Dig =< $9 ->
+           is_digits(Tail);
+       true ->
+           false
+    end;
+is_digits([]) ->
+    true.
+
+has_var(X) when is_atom(X) ->
+    if X == '_' ->
+           true;
+       is_atom(X) ->
+           is_dollar_digits(X);
+       true ->
+           false
+    end;
+has_var(X) when is_tuple(X) ->
+    e_has_var(X, size(X));
+has_var([H | T]) ->
+    case has_var(H) of
+        false ->
+            has_var(T);
+        Other ->
+            Other
+    end;
+has_var(_) ->
+    false.
+
+e_has_var(_, 0) ->
+    false;
+e_has_var(X, Pos) ->
+    case has_var(element(Pos, X)) of
+        false ->
+            e_has_var(X, Pos - 1);
+        Other ->
+            Other
     end.
 
 mktab(Tab, [{keypos, 2}, public, named_table, Type | EtsOpts])
@@ -177,7 +225,7 @@ resolve_cc_add(Res) ->
 
 remote_match_object(Tab, Pat) ->
     Key = element(2, Pat),
-    case mnesia:has_var(Key) of
+    case has_var(Key) of
         false ->
             db_match_object(Tab, Pat);
         true ->
@@ -187,7 +235,7 @@ remote_match_object(Tab, Pat) ->
 
 remote_match_object(Tab, Pat, [Pos | Tail]) when Pos =< tuple_size(Pat) ->
     IxKey = element(Pos, Pat),
-    case mnesia:has_var(IxKey) of
+    case has_var(IxKey) of
         false ->
             % TODO maybe a good idea to do filtermap afterwards
             % benchmark to see
@@ -200,6 +248,41 @@ remote_match_object(Tab, Pat, []) ->
     db_match_object(Tab, Pat);
 remote_match_object(Tab, Pat, _PosList) ->
     mnesia:abort({bad_type, Tab, Pat}).
+
+
+remote_ec_select(Tab, Spec) ->
+    case Spec of
+        [{HeadPat, _, _}] when is_tuple(HeadPat), tuple_size(HeadPat) > 2 ->
+            Key = element(2, HeadPat),
+            case has_var(Key) of
+                false ->
+                    mnesia_lib:db_select(Tab, Spec);
+                true ->
+                    PosList = regular_indexes(Tab),
+                    remote_ec_select(Tab, Spec, PosList)
+            end;
+        _ ->
+            mnesia_lib:db_select(Tab, Spec)
+    end.
+
+remote_ec_select(Tab, [{HeadPat, _, _}] = Spec, [Pos | Tail])
+    when is_tuple(HeadPat), tuple_size(HeadPat) > 2, Pos =< tuple_size(HeadPat) ->
+    Key = element(Pos, HeadPat),
+    case has_var(Key) of
+        false ->
+            Recs = mnesia_index:dirty_select(Tab, HeadPat, Pos),
+            %% Returns the records without applying the match spec
+            %% The actual filtering is handled by the caller
+            CMS = ets:match_spec_compile(Spec),
+            ets:match_spec_run(Recs, CMS);
+        true ->
+            remote_ec_select(Tab, Spec, Tail)
+    end;
+remote_ec_select(Tab, Spec, _) ->
+    mnesia_lib:db_select(Tab, Spec).
+
+
+    
 
 regular_indexes(Tab) ->
     PosList = val({Tab, index}),

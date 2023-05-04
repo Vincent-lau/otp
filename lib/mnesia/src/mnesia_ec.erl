@@ -894,27 +894,27 @@ do_ec_rpc(Tab, Node, M, F, Args) ->
 
 ec_read(Tab, Key) ->
     Mod = get_crdt_module(Tab),
-    Mod:db_get(Tab, Key).
+    ec_rpc(Tab, Mod, db_get, [Tab, Key]).
 
 ec_select(Tab, Spec) ->
     Mod = get_crdt_module(Tab),
-    Mod:db_select(Tab, Spec).
+    ec_rpc(Tab, Mod, remote_ec_select, [Tab, Spec]).
 
 ec_first(Tab) ->
     Mod = get_crdt_module(Tab),
-    Mod:db_first(Tab).
+    ec_rpc(Tab, Mod, db_first, [Tab]).
 
 ec_last(Tab) ->
     Mod = get_crdt_module(Tab),
-    Mod:db_last(Tab).
+    ec_rpc(Tab, Mod, db_last, [Tab]).
 
 ec_prev(Tab, Key) ->
     Mod = get_crdt_module(Tab),
-    Mod:db_prev_key(Tab, Key).
+    ec_rpc(Tab, Mod, db_prev_key, [Tab, Key]).
 
 ec_next(Tab, Key) ->
     Mod = get_crdt_module(Tab),
-    Mod:db_next_key(Tab, Key).
+    ec_rpc(Tab, Mod, db_next_key, [Tab, Key]).
 
 -spec ec_match_object(Tab, Pattern) -> [Record]
     when Tab :: mnesia:table(),
