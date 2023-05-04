@@ -8,6 +8,7 @@
 -export([remote_match_object/2]).
 -export([spawn_stabiliser/1]).
 -export([reify/3]).
+-export([index_match_object/3,index_read/3]).
 
 -type op() :: write | delete.
 -type val() :: any().
@@ -146,6 +147,15 @@ db_select(Tab, Spec) ->
     Res = mnesia_lib:db_select(Tab, Spec1),
     dbg_out("running my own select function on ~p with spec ~p got ~p", [Tab, Spec, Res]),
     Res.
+
+index_read(Tab, Key, Attr) ->
+    Tups = mnesia_index:dirty_read(Tab, Key, Attr),
+    [remove_ts(Tup) || Tup <- Tups].
+
+index_match_object(Tab, Pat, Pos) ->
+    Pat2 = wild_ts(Pat),
+    Tups = mnesia_index:dirty_match_object(Tab, Pat2, Pos),
+    [remove_ts(Tup) || Tup <- Tups].
 
 uniq(Tab, Res) ->
     case val({Tab, setorbag}) of

@@ -10,14 +10,12 @@
 -export([repair_inconsistency/3]).
 -export([start/0, init/1]).
 
--compile([nowarn_unused_vars]).
-
 -define(ACKER, mnesia_ec_ack).
 -define(CRDTMOD, mnesia_pawset).
 
 -record(prep,
         {protocol = async_ec,
-         %% async_dirty | sync_dirty | sym_trans | sync_sym_trans | asym_trans | sync_asym_trans
+         %% async_ec | sync_ec
          records = [],
          prev_tab = [], % initiate to a non valid table name
          prev_types,
@@ -42,6 +40,53 @@ val(Var) ->
             mnesia_lib:other_val(Var, Stacktrace);
         Value ->
             Value
+    end.
+
+is_dollar_digits(Var) ->
+    case atom_to_list(Var) of
+        [$$ | Digs] ->
+            is_digits(Digs);
+        _ ->
+            false
+    end.
+
+is_digits([Dig | Tail]) ->
+    if $0 =< Dig, Dig =< $9 ->
+           is_digits(Tail);
+       true ->
+           false
+    end;
+is_digits([]) ->
+    true.
+
+has_var(X) when is_atom(X) ->
+    if X == '_' ->
+           true;
+       is_atom(X) ->
+           is_dollar_digits(X);
+       true ->
+           false
+    end;
+has_var(X) when is_tuple(X) ->
+    e_has_var(X, size(X));
+has_var([H | T]) ->
+    case has_var(H) of
+        false ->
+            has_var(T);
+        Other ->
+            Other
+    end;
+has_var(_) ->
+    false.
+
+e_has_var(_, 0) ->
+    false;
+e_has_var(X, Pos) ->
+    case has_var(element(Pos, X)) of
+        false ->
+            e_has_var(X, Pos - 1);
+        Other ->
+            Other
     end.
 
 start() ->
@@ -122,22 +167,30 @@ lock(Tid, Ts, LockItem, LockKind) ->
     mnesia:lock(Tid, Ts, LockItem, LockKind).
 
 write({SyncMode, _Pid}, _Ts, Tab, Val, _LockKind)
-    when is_atom(Tab), Tab /= schema, is_tuple(Val), tuple_size(Val) > 2,
-         SyncMode =:= sync_ec;
-         SyncMode =:= async_ec ->
+    when is_atom(Tab)
+         andalso Tab /= schema
+         andalso is_tuple(Val)
+         andalso tuple_size(Val) > 2
+         andalso (SyncMode =:= sync_ec orelse SyncMode =:= async_ec) ->
     do_ec_write(SyncMode, Tab, Val);
 write(Tid, Ts, Tab, Val, LockKind) ->
     mnesia:write(Tid, Ts, Tab, Val, LockKind).
 
-delete({SyncMode, _Pid}, Ts, Tab, Key, _LockKind)
-    when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
+delete({SyncMode, _Pid}, _Ts, Tab, Key, _LockKind)
+    when is_atom(Tab)
+         andalso Tab /= schema
+         andalso (SyncMode =:= sync_ec orelse SyncMode =:= async_ec) ->
     do_ec_delete(SyncMode, Tab, Key);
 delete(Tid, Ts, Tab, Val, LockKind) ->
     mnesia:delete(Tid, Ts, Tab, Val, LockKind).
 
-delete_object({SyncMode, _Pid}, Ts, Tab, Val, _LockKind)
-    when is_atom(Tab), Tab /= schema, is_tuple(Val), tuple_size(Val) > 2 ->
-    case mnesia:has_var(Val) of
+delete_object({SyncMode, _Pid}, _Ts, Tab, Val, _LockKind)
+    when is_atom(Tab)
+         andalso Tab /= schema
+         andalso is_tuple(Val)
+         andalso tuple_size(Val) > 2
+         andalso (SyncMode =:= async_ec orelse SyncMode =:= sync_ec) ->
+    case has_var(Val) of
         false ->
             do_ec_delete_object(SyncMode, Tab, Val);
         true ->
@@ -147,17 +200,22 @@ delete_object(Tid, Ts, Tab, Val, LockKind) ->
     mnesia:delete_object(Tid, Ts, Tab, Val, LockKind).
 
 read({SyncMode, _Pid}, _Ts, Tab, Key, _LockKind)
-    when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
+    when is_atom(Tab)
+         andalso Tab /= schema
+         andalso (SyncMode =:= sync_ec orelse SyncMode =:= async_ec) ->
     ec_read(Tab, Key);
 read(_Tid, _Ts, Tab, _Key, _LockKind) ->
     mnesia:abort({bad_type, Tab}).
 
-match_object({SyncMode, _Pid} = Tid, Ts, Tab, Pat, _LockKind)
-    when is_atom(Tab), Tab /= schema, is_tuple(Pat), tuple_size(Pat) > 2 ->
+match_object({SyncMode, _Pid}, _Ts, Tab, Pat, _LockKind)
+    when is_atom(Tab)
+         andalso Tab /= schema
+         andalso is_tuple(Pat)
+         andalso tuple_size(Pat) > 2
+         andalso (SyncMode =:= async_ec orelse SyncMode =:= sync_ec) ->
     ec_match_object(Tab, Pat);
 match_object(Tid, Ts, Tab, Pat, LockKind) ->
     mneisa:match_object(Tid, Ts, Tab, Pat, LockKind).
-
 
 -spec get_crdt_module(mnesia:table()) -> module().
 get_crdt_module(Tab) ->
@@ -168,81 +226,82 @@ get_crdt_module(Tab) ->
             mnesia_prwset;
         _ ->
             error({bad_ec_tab_type, Tab})
-        end.
+    end.
 
-
-all_keys({SyncMode, _Pid} = Tid, _Ts, Tab, _LockKind)
-    when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
+all_keys({SyncMode, _Pid}, _Ts, Tab, _LockKind)
+    when is_atom(Tab)
+         andalso Tab /= schema
+         andalso (SyncMode =:= sync_ec orelse SyncMode =:= async_ec) ->
     Mod = get_crdt_module(Tab),
     Mod:db_all_keys(Tab);
 all_keys(_Tid, _Ts, Tab, _LockKind) ->
     mnesia:abort({bad_type, Tab}).
 
 first({SyncMode, _Pid}, _Ts, Tab)
-    when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
+    when is_atom(Tab)
+         andalso Tab /= schema
+         andalso (SyncMode =:= sync_ec orelse SyncMode =:= async_ec) ->
     ec_first(Tab);
 first(_Tid, _Ts, Tab) ->
     mnesia:abort({bad_type, Tab}).
 
 last({SyncMode, _Pid}, _Ts, Tab)
-    when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
+    when is_atom(Tab)
+         andalso Tab /= schema
+         andalso (SyncMode =:= sync_ec orelse SyncMode =:= async_ec) ->
     ec_last(Tab);
 last(_Tid, _Ts, Tab) ->
     mnesia:abort({bad_type, Tab}).
 
 prev({SyncMode, _Pid}, _Ts, Tab, Key)
-    when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
+    when is_atom(Tab)
+         andalso Tab /= schema
+         andalso (SyncMode =:= sync_ec orelse SyncMode =:= async_ec) ->
     ec_prev(Tab, Key);
 prev(_Tid, _Ts, Tab, _) ->
     mnesia:abort({bad_type, Tab}).
 
-next({SyncMode, _pid}, _Ts, Tab, Key)
-    when is_atom(Tab), Tab /= schema, SyncMode =:= sync_ec; SyncMode =:= async_ec ->
+next({SyncMode, _Pid}, _Ts, Tab, Key)
+    when is_atom(Tab)
+         andalso Tab /= schema
+         andalso (SyncMode =:= sync_ec orelse SyncMode =:= async_ec) ->
     ec_next(Tab, Key);
 next(_Tid, _Ts, Tab, _) ->
     mnesia:abort({bad_type, Tab}).
 
-index_match_object(Tid, Ts, Tab, Pat, Attr, LockKind)
-    when is_atom(Tab), Tab /= schema, is_tuple(Pat), tuple_size(Pat) > 2 ->
+index_match_object({SyncMode, _Pid}, _Ts, Tab, Pat, Attr, _LockKind)
+    when is_atom(Tab)
+         andalso Tab /= schema
+         andalso is_tuple(Pat)
+         andalso tuple_size(Pat) > 2
+         andalso (SyncMode =:= async_ec orelse SyncMode =:= sync_ec) ->
     ec_index_match_object(Tab, Pat, Attr);
 index_match_object(_Tid, _Ts, Tab, Pat, _Attr, _LockKind) ->
     mnesia:abort({bad_type, Tab, Pat}).
 
-index_read(Tid, Ts, Tab, Key, Attr, LockKind) ->
-    ok.%                           when is_atom(Tab), Tab /= schema ->
-       %                             case element(1, Tid) of
-       %                             ets ->
-       %                                 dirty_index_read(Tab, Key, Attr); % Should be optimized?
-       %                             tid ->
-       %                                 Pos = mnesia_schema:attr_tab_to_pos(Tab, Attr),
-       %                                 case LockKind of
-       %                                 read ->
-       %                                     case has_var(Key) of
-       %                                     false ->
-       %                                         Store = Ts#tidstore.store,
-       %                                         Objs = mnesia_index:read(Tid, Store, Tab, Key, Pos),
-       %                                                     add_written_index(
-       %                                                       Ts#tidstore.store, Pos, Tab, Key, Objs);
-       %                                     true ->
-       %                                         abort({bad_type, Tab, Attr, Key})
-       %                                     end;
-       %                                 _ ->
-       %                                     abort({bad_type, Tab, LockKind})
-       %                                 end;
-       %                             _Protocol ->
-       %                                 dirty_index_read(Tab, Key, Attr)
-       %                             end;
-       %                         index_read(_Tid, _Ts, Tab, _Key, _Attr, _LockKind) ->
-       %                             abort({bad_type, Tab}).
+index_read({SyncMode, _}, _Ts, Tab, Key, Attr, _LockKind)
+    when is_atom(Tab)
+         andalso Tab /= schema
+         andalso (SyncMode =:= async_ec orelse SyncMode =:= sync_ec) ->
+    Pos = mnesia_schema:attr_tab_to_pos(Tab, Attr),
+    Mod = get_crdt_module(Tab),
+    case has_var(Key) of
+        false ->
+            Mod:index_read(Tab, Key, Pos);
+        true ->
+            mnesia:abort({bad_type, Tab, Attr, Key})
+    end;
+index_read(_Tid, _Ts, Tab, _Key, _Attr, _LockKind) ->
+    mnesia:abort({bad_type, Tab}).
 
 select({SyncMode, _Pid}, _Ts, Tab, Spec, _LockKind)
-    when SyncMode =:= sync_ec; SyncMode =:= async_ec ->
+    when SyncMode =:= sync_ec orelse SyncMode =:= async_ec ->
     ec_select(Tab, Spec);
 select(Tid, Ts, Tab, Spec, LockKind) ->
     mnesia:select(Tid, Ts, Tab, Spec, LockKind).
 
 table_info({SyncMode, _Pid} = Tid, Ts, Tab, Item)
-    when SyncMode =:= sync_ec; SyncMode =:= async_ec ->
+    when SyncMode =:= sync_ec orelse SyncMode =:= async_ec ->
     mnesia:table_info(Tid, Ts, Tab, Item).
 
 %% Private functions, copied or modified from mnesia.erl and mnesia_tm.erl
@@ -353,14 +412,7 @@ do_prepare_items(Tid, Tab, Key, Types, Snmp, Items, Recs) ->
     Recs2 = mnesia_tm:prepare_snmp(Tid, Tab, Key, Types, Snmp, Items, Recs), % May exit
     Recs3 = mnesia_tm:prepare_nodes(Tid, Types, Items, Recs2, normal),
     verbose("do prepare_items Rec3: ~p ~p ~p ~p~n", [Tid, Types, Items, Recs2]),
-    case mnesia_monitor:get_env(causal) of
-        true ->
-            dbg_out("applying causal delivery~n", []),
-            prepare_ts(Recs3);
-        false ->
-            dbg_out("not applying causal delivery~n", []),
-            Recs3
-    end.
+    prepare_ts(Recs3).
 
 -spec prepare_ts([#commit{}]) -> [#commit{}].
 prepare_ts(Recs) ->
@@ -402,7 +454,7 @@ do_update_ts({ext, _Alias, _Mod}, ExtCopy, Ts) ->
 %     Other ->
 %         Other
 % end;
-do_update_ts(Storage, Copies, Ts) ->
+do_update_ts(Storage, _Copies, _Ts) ->
     mnesia:abort({bad_storage, Storage}).
 
 add_time({Oid, Val, Op}, Ts) ->
@@ -410,7 +462,7 @@ add_time({Oid, Val, Op}, Ts) ->
 add_time({ExtInfo, {Oid, Val, Op}}, Ts) ->
     {ExtInfo, {Oid, erlang:append_element(Val, Ts), Op}}.
 
-receive_msg(Tid, Commit, Tab, local, _Reify) ->
+receive_msg(Tid, Commit, _Tab, local, _Reify) ->
     mnesia_causal:deliver_one(Commit),
     do_ec(Tid, Commit);
 receive_msg(Tid, Commit, Tab, {rcv, async}, Reify) ->
@@ -421,10 +473,10 @@ receive_msg(Tid, Commit, Tab, {rcv, async}, Reify) ->
                      do_async_ec(Tid1, mnesia_tm:new_cr_format(Commit1), Tab1)
                   end,
                   Deliverable);
-receive_msg(Tid, Commit, Tab, {rcv, {sync, From}}, Reify) ->
+receive_msg(Tid, Commit, Tab, {rcv, {sync, From}}, _Reify) ->
     Deliverable = mnesia_causal:rcv_msg(Tid, Commit, Tab, From),
     dbg_out("found sync_ec devliverable commits: ~p~n", [Deliverable]),
-    lists:foreach(fun({Tid1, Commit1 = #commit{sender = Sender}, Tab1, From1}) ->
+    lists:foreach(fun({Tid1, Commit1 = #commit{}, Tab1, From1}) ->
                      do_sync_ec(From1, Tid1, mnesia_tm:new_cr_format(Commit1), Tab1)
                   end,
                   Deliverable).
@@ -503,7 +555,7 @@ needs_ack(Tid, Commit, Tab) ->
     end.
 
 -spec send_ack(#commit{}) -> ok.
-send_ack(Commit = #commit{sender = Sender}) ->
+send_ack(Commit = #commit{}) ->
     case whereis(?ACKER) of
         undefined ->
             ok;
@@ -527,7 +579,7 @@ ack_loop(#ack_state{buffer = Buffer}) ->
             ack_loop(#ack_state{buffer = Buffer2});
         {_From, {sync_buffer, Node}} ->
             Buf = maps:get(Node, Buffer),
-            maps:foreach(fun(K, {Tid, Cmt, Tab}) ->
+            maps:foreach(fun(_K, {Tid, Cmt, Tab}) ->
                             {WaitFor, FirstRes} = async_send_ec(Tid, [Cmt], Tab, Node),
                             rec_ec(WaitFor, FirstRes)
                          end,
@@ -598,15 +650,15 @@ do_ec(Tid, Commit) when Commit#commit.schema_ops == [] ->
 
 reify(_, _, _, false) ->
     ok;
-reify(Tid, C, Tab, true) ->
+reify(Tid, C, _Tab, true) ->
     R = [],
     R2 = do_reify(Tid, ram_copies, C#commit.ram_copies, C#commit.ts, R),
-    R3 = do_reify(Tid, disc_copies,  C#commit.disc_copies, C#commit.ts, R2),
-    R4 = do_reify(Tid,  disc_only_copies,  C#commit.disc_only_copies, C#commit.ts, R3),
-    R5 = do_reify_ext(Tid,  C#commit.ext, C#commit.ts, R4).
+    R3 = do_reify(Tid, disc_copies, C#commit.disc_copies, C#commit.ts, R2),
+    R4 = do_reify(Tid, disc_only_copies, C#commit.disc_only_copies, C#commit.ts, R3),
+    do_reify_ext(Tid, C#commit.ext, C#commit.ts, R4).
 
 do_reify(Tid, Storage, [Op1 | Ops], Ts, OldRes) ->
-    Op = {{Tab, K}, Obj, _OpName} = do_update_ts(Storage, Op1, Ts),
+    Op = {{Tab, _K}, Obj, _OpName} = do_update_ts(Storage, Op1, Ts),
     Mod = get_crdt_module(Tab),
     try Mod:reify(Storage, Tab, Obj) of
         ok ->
@@ -618,10 +670,10 @@ do_reify(Tid, Storage, [Op1 | Ops], Ts, OldRes) ->
             verbose("do_reify in ~w failed: ~tp -> {'EXIT', ~tp}~n", [Tid, Op, {Reason, ST}]),
             do_reify(Tid, Storage, Ops, Ts, OldRes)
     end;
-do_reify(_Tid, _Storage, [], Ts, Res) ->
+do_reify(_Tid, _Storage, [], _Ts, Res) ->
     Res.
 
-do_reify_ext(_Tid, [], Ts, OldRes) ->
+do_reify_ext(_Tid, [], _Ts, OldRes) ->
     OldRes;
 do_reify_ext(Tid, Ext, Ts, OldRes) ->
     case lists:keyfind(ext_copies, 1, Ext) of
@@ -651,7 +703,7 @@ do_commit(Tid, C, DumperMode) ->
     R5.
 
 %% This could/should be optimized
-do_update_ext(_Tid, [], Ts, OldRes) ->
+do_update_ext(_Tid, [], _Ts, OldRes) ->
     OldRes;
 do_update_ext(Tid, Ext, Ts, OldRes) ->
     case lists:keyfind(ext_copies, 1, Ext) of
@@ -681,7 +733,7 @@ do_update(Tid, Storage, [Op1 | Ops], Ts, OldRes) ->
             verbose("do_update in ~w failed: ~tp -> {'EXIT', ~tp}~n", [Tid, Op, {Reason, ST}]),
             do_update(Tid, Storage, Ops, Ts, OldRes)
     end;
-do_update(_Tid, _Storage, [], Ts, Res) ->
+do_update(_Tid, _Storage, [], _Ts, Res) ->
     Res.
 
 do_update_op(Tid, Storage, {{Tab, K}, Obj, write}) ->
@@ -875,8 +927,30 @@ ec_match_object(Tab, Pat)
 ec_match_object(Tab, Pat) ->
     mnesia:abort({bad_type, Tab, Pat}).
 
-ec_index_match_object(Tab, Pat, Attr) ->
-    unimplemnted.
+ec_index_match_object(Tab, Pat, Attr)
+    when is_atom(Tab), Tab /= schema, is_tuple(Pat), tuple_size(Pat) > 2 ->
+    Mod = get_crdt_module(Tab),
+    case mnesia_schema:attr_tab_to_pos(Tab, Attr) of
+        {_} ->
+            ec_match_object(Tab, Pat);
+        Pos when Pos =< tuple_size(Pat) ->
+            case has_var(element(2, Pat)) of
+                false ->
+                    ec_match_object(Tab, Pat);
+                true ->
+                    Elem = element(Pos, Pat),
+                    case has_var(Elem) of
+                        false ->
+                            ec_rpc(Tab, Mod, index_match_object, [Tab, Pat, Pos]);
+                        true ->
+                            mnesia:abort({bad_type, Tab, Attr, Elem})
+                    end
+            end;
+        BadPos ->
+            mnesia:abort({bad_type, Tab, BadPos})
+    end;
+ec_index_match_object(Tab, Pat, _Attr) ->
+    mnesia:abort({bad_type, Tab, Pat}).
 
 %% =============== stop operations ===============
 
@@ -895,5 +969,5 @@ handle_exit(Pid, Reason, State) when Pid == element(1, State#state.acker) ->
     dbg_out("acker died: ~p~n", [Reason]),
     do_stop(State).
 
-do_stop(#state{coordinators = Coordinators}) ->
+do_stop(#state{}) ->
     exit(shutdown).

@@ -7,8 +7,10 @@
 -export([init_per_testcase/2, end_per_testcase/2, init_per_group/2, end_per_group/2,
          all/0, groups/0]).
 -export([sync_ec_rw_ram/1, sync_ec_rw_compare_dirty_ram/1, sync_ec_rwd_ram/1]).
+-export([async_ec_index_read_ram/1]).
 -export([async_ec_rw_ram/1, async_ec_rwd_ram/1, async_ec_rw_compare_dirty_ram/1]).
--export([ec_rwd_block_ram/1, ec_block_40keys_ram/1, ec_write_block_ram/1, ec_delete_block_ram/1]).
+-export([ec_rwd_block_ram/1, ec_block_40keys_ram/1, ec_write_block_ram/1,
+         ec_delete_block_ram/1]).
 
 init_per_testcase(Func, Conf) ->
     mnesia_test_lib:init_per_testcase(Func, Conf).
@@ -18,10 +20,14 @@ end_per_testcase(Func, Conf) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 all() ->
-    [{group, ec_cc_crud_block}, {group, ec_cc_crud}, {group, ec_compare_dirty}].
+    [{group, ec_cc_crud_block},
+     {group, ec_index_read},
+     {group, ec_cc_crud},
+     {group, ec_compare_dirty}].
 
 groups() ->
     [{ec_cc_crud, [], [async_ec_rw_ram, async_ec_rwd_ram, sync_ec_rw_ram, sync_ec_rwd_ram]},
+     {ec_index_read, [], [async_ec_index_read_ram]},
      {ec_compare_dirty, [], [async_ec_rw_compare_dirty_ram, sync_ec_rw_compare_dirty_ram]},
      {ec_cc_crud_block,
       [sequence],
@@ -179,6 +185,53 @@ ec_rw_compare_dirty(Config, Storage) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+async_ec_index_read_ram(suite) ->
+    [];
+async_ec_index_read_ram(Config) ->
+    async_ec_index_read(Config, ram_copies).
+
+async_ec_index_read(Config, Storage) ->
+    Nodes = [_NodeA, NodeA1, NodeA2] = ?acquire_nodes(3, Config),
+    Tab = ec_index_read,
+    Def = [{Storage, Nodes}, {type, pawset}, {attributes, [k, v]}],
+    ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
+    ?match({atomic, ok}, mnesia:add_table_index(Tab, v)),
+
+    Writer = fun(K, V) -> mnesia:write({Tab, K, V}) end,
+    spawn(fun() ->
+             lists:foreach(fun(N) -> mnesia:activity(async_ec, fun() -> Writer(N, 4) end) end,
+                           lists:seq(1, 20))
+          end),
+    spawn(fun() ->
+             mnesia_rpc:call(NodeA1,
+                             lists,
+                             foreach,
+                             [fun(N) -> mnesia:activity(async_ec, fun() -> Writer(N, 5) end) end,
+                              lists:seq(21, 30)])
+          end),
+    spawn(fun() ->
+             mnesia_rpc:call(NodeA2,
+                             lists,
+                             foreach,
+                             [fun(N) -> mnesia:activity(async_ec, fun() -> Writer(N, 6) end) end,
+                              lists:seq(31, 40)])
+          end),
+
+    sleep_if_async(async_ec, 1000),
+
+    Keys5 = mnesia:async_ec(fun() -> mnesia:index_read(Tab, 5, 3) end),
+    Expected5 = [{Tab, N, 5} || N <- lists:seq(21, 30)],
+    ?match(Expected5, lists:sort(Keys5)),
+    Keys6 = mnesia:async_ec(fun() -> mnesia:index_match_object({Tab, '_', 6}, v) end),
+    Expected6 = [{Tab, N, 6} || N <- lists:seq(31, 40)],
+    ?match(Expected6, lists:sort(Keys6)),
+    KeyNone = mnesia:async_ec(fun() -> mnesia:index_read(Tab, 7, 3) end),
+    ?match([], KeyNone),
+
+    ?verify_mnesia(Nodes, []).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
 ec_write_block_ram(suite) ->
     [];
 ec_write_block_ram(Config) when is_list(Config) ->
@@ -245,8 +298,8 @@ ec_delete_block(Config, Storage) ->
     ?match([{Tab, a, 1}], mnesia:async_ec(fun() -> Reader(a) end)),
 
     spawn(NodeA1, BlockAndDelete),
-    spawn(fun() -> mnesia:async_ec(fun () -> Deleter(a) end) end),
-        
+    spawn(fun() -> mnesia:async_ec(fun() -> Deleter(a) end) end),
+
     timer:sleep(500),
     ?match([], mnesia:async_ec(fun() -> Reader(a) end)),
     ?match([{Tab, b, 2}], mnesia:async_ec(fun() -> Reader(b) end)),
