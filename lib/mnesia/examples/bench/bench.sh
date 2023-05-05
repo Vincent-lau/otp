@@ -7,7 +7,7 @@
 QE_PATH=~/proj/quantile_estimator/ebin
 PROXY_PATH=~/proj/inet_tcp_proxy/ebin
 args="-pa .. -pa $QE_PATH -pa $PROXY_PATH  -boot start_sasl \
--sasl errlog_type error -sname bench +sbt db"
+-sasl errlog_type error -sname bench1 +sbt db"
 
 # -proto_dist inet_tcp_proxy"
 

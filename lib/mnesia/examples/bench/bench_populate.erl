@@ -31,6 +31,7 @@
 
 %% Public
 -export([start/1]).
+
 -compile(export_all).
 -compile(nowarn_export_all).
 -compile(debug_info).
@@ -60,8 +61,7 @@ start(C) when is_record(C, config) ->
 %% Create the tables
 %% -------------------------------------------------------------------
 
-create_tables(C) when 
-    C#config.activity =:= async_ec ->
+create_tables(C) when C#config.activity =:= async_ec ->
     ?d("    Delete old tables...~n", []),
     mnesia:delete_table(group),
     mnesia:delete_table(subscriber),

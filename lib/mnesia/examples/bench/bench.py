@@ -88,7 +88,7 @@ def gen_config(params):
 
 
 def main():
-    for i in range(5, 9, 2):
+    for i in range(3, 5, 2):
         params = change_nodes(i, i)
         gen_config(params)
         os.system(f'echo >> {log_file}')
