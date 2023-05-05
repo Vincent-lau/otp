@@ -8,7 +8,7 @@
 -export([remote_match_object/2, remote_ec_select/2]).
 -export([spawn_stabiliser/1]).
 -export([reify/3]).
--export([index_match_object/3,index_read/3]).
+-export([index_match_object/3, index_read/3]).
 
 -type op() :: write | delete.
 -type val() :: any().
@@ -28,7 +28,6 @@ val(Var) ->
         Value ->
             Value
     end.
-
 
 is_dollar_digits(Var) ->
     case atom_to_list(Var) of
@@ -237,8 +236,6 @@ remote_match_object(Tab, Pat, [Pos | Tail]) when Pos =< tuple_size(Pat) ->
     IxKey = element(Pos, Pat),
     case has_var(IxKey) of
         false ->
-            % TODO maybe a good idea to do filtermap afterwards
-            % benchmark to see
             Pat1 = wild_ts(Pat),
             mnesia_index:dirty_match_object(Tab, Pat1, Pos);
         true ->
@@ -248,7 +245,6 @@ remote_match_object(Tab, Pat, []) ->
     db_match_object(Tab, Pat);
 remote_match_object(Tab, Pat, _PosList) ->
     mnesia:abort({bad_type, Tab, Pat}).
-
 
 remote_ec_select(Tab, Spec) ->
     case Spec of
@@ -280,9 +276,6 @@ remote_ec_select(Tab, [{HeadPat, _, _}] = Spec, [Pos | Tail])
     end;
 remote_ec_select(Tab, Spec, _) ->
     mnesia_lib:db_select(Tab, Spec).
-
-
-    
 
 regular_indexes(Tab) ->
     PosList = val({Tab, index}),
@@ -447,9 +440,6 @@ key_pos(Tab) ->
 obj2ele(Obj) ->
     {get_ts(Obj), {get_op(Obj), get_val_tup(Obj)}}.
 
-% ele2obj({Ts, {Op, Val}}) ->
-%     add_meta(Val, Ts, Op).
-
 get_val_ele({_Ts, {_Op, V}}) ->
     V.
 
@@ -481,14 +471,6 @@ equals(Tab, V1, V2) ->
 get_val_key(Tab, V) ->
     element(key_pos(Tab), V).
 
-% -spec add_ts(tuple(), ts()) -> tuple().
-% add_ts(Obj, Ts) ->
-%     erlang:append_element(Obj, Ts).
-
-% -spec add_op(tuple(), op()) -> tuple().
-% transform_meta(Obj, Op) ->
-%     add_op(transform_key(Obj), Op).
-
 add_op(Obj, Op) ->
     erlang:append_element(Obj, Op).
 
@@ -503,9 +485,6 @@ get_ts(Obj) ->
 
 get_ts(Idx, Obj) ->
     element(Idx, Obj).
-
-% set_ts(Obj, Ts) ->
-%     setelement(tuple_size(Obj) - 1, Obj, Ts).
 
 set_ts(Obj, Ts, Idx) ->
     setelement(Idx, Obj, Ts).
