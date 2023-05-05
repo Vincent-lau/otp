@@ -11,7 +11,6 @@
 -export([start/0, init/1]).
 
 -define(ACKER, mnesia_ec_ack).
--define(CRDTMOD, mnesia_pawset).
 
 -record(prep,
         {protocol = async_ec,
@@ -19,19 +18,9 @@
          records = [],
          prev_tab = [], % initiate to a non valid table name
          prev_types,
-         prev_snmp,
-         types,
-         majority = [],
-         sync = false}).
+         prev_snmp}).
 -record(state,
-        {coordinators = gb_trees:empty(),
-         participants = gb_trees:empty(),
-         supervisor,
-         stabiliser,
-         acker,
-         blocked_tabs = [],
-         ec_queue = [],
-         reify = false}).
+        {supervisor, stabiliser, acker, blocked_tabs = [], ec_queue = [], reify = false}).
 -record(ack_state, {buffer :: #{node() => sets:set()}}).
 
 val(Var) ->
@@ -96,8 +85,6 @@ init(Parent) ->
     register(?MODULE, self()),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
-    mnesia_monitor:set_env(causal, true),
-    {SPid, SRef} = ?CRDTMOD:spawn_stabiliser(no),
     {APid, ARef} = spawn_acker(no),
     case val(debug) of
         Debug when Debug /= debug, Debug /= trace ->
@@ -106,7 +93,7 @@ init(Parent) ->
             mnesia_subscr:subscribe(whereis(mnesia_event), {table, schema})
     end,
     proc_lib:init_ack(Parent, {ok, self()}),
-    doit_loop(#state{stabiliser = {SPid, SRef},
+    doit_loop(#state{stabiliser = {undefined, undefined},
                      acker = {APid, ARef},
                      supervisor = Parent,
                      reify = false}).
@@ -365,30 +352,13 @@ prepare_items(Tid, Tab, Key, Items, Prep) ->
             unblocked = req({unblock_me, Tab}),
             prepare_items(Tid, Tab, Key, Items, Prep);
         _ ->
-            Majority = mnesia_tm:needs_majority(Tab, Prep),
             Snmp = val({Tab, snmp}),
             Recs2 = do_prepare_items(Tid, Tab, Key, Types, Snmp, Items, Prep#prep.records),
-            Prep2 =
-                Prep#prep{records = Recs2,
-                          prev_tab = Tab,
-                          majority = Majority,
-                          prev_types = Types,
-                          prev_snmp = Snmp},
-            check_prep(Prep2, Types)
+            Prep#prep{records = Recs2,
+                      prev_tab = Tab,
+                      prev_types = Types,
+                      prev_snmp = Snmp}
     end.
-
-check_prep(#prep{majority = [], types = Types} = Prep, Types) ->
-    Prep;
-check_prep(#prep{majority = M, types = undefined} = Prep, Types) ->
-    Protocol =
-        if M == [] ->
-               Prep#prep.protocol;
-           true ->
-               asym_trans
-        end,
-    Prep#prep{protocol = Protocol, types = Types};
-check_prep(Prep, _Types) ->
-    Prep#prep{protocol = asym_trans}.
 
 req(R) ->
     case whereis(?MODULE) of
@@ -409,10 +379,78 @@ rec(Pid, Ref) ->
     end.
 
 do_prepare_items(Tid, Tab, Key, Types, Snmp, Items, Recs) ->
-    Recs2 = mnesia_tm:prepare_snmp(Tid, Tab, Key, Types, Snmp, Items, Recs), % May exit
-    Recs3 = mnesia_tm:prepare_nodes(Tid, Types, Items, Recs2, normal),
+    Recs2 = prepare_snmp(Tid, Tab, Key, Types, Snmp, Items, Recs), % May exit
+    Recs3 = prepare_nodes(Tid, Types, Items, Recs2, normal),
     verbose("do prepare_items Rec3: ~p ~p ~p ~p~n", [Tid, Types, Items, Recs2]),
     prepare_ts(Recs3).
+
+prepare_snmp(_Tid, _Tab, _Key, _Types, [], _Items, Recs) ->
+    Recs;
+prepare_snmp(Tid, Tab, Key, Types, Us, Items, Recs) ->
+    if Key /= '_' ->
+           {_Oid, _Val, Op} = hd(Items),
+           SnmpOid = mnesia_snmp_hook:key_to_oid(Tab, Key, Us), % May exit
+           prepare_nodes(Tid, Types, [{Op, Tab, Key, SnmpOid}], Recs, snmp);
+       Key == '_' ->
+           prepare_nodes(Tid, Types, [{clear_table, Tab}], Recs, snmp)
+    end.
+
+%% Returns a list of commit records
+prepare_nodes(Tid, [{Node, Storage} | Rest], Items, C, Kind) ->
+    {Rec, C2} = pick_node(Tid, Node, C, []),
+    Rec2 = prepare_node(Node, Storage, Items, Rec, Kind),
+    [Rec2 | prepare_nodes(Tid, Rest, Items, C2, Kind)];
+prepare_nodes(_Tid, [], _Items, CommitRecords, _Kind) ->
+    CommitRecords.
+
+pick_node(Tid, Node, [Rec | Rest], Done) ->
+    if Rec#commit.node == Node ->
+           {Rec, Done ++ Rest};
+       true ->
+           pick_node(Tid, Node, Rest, [Rec | Done])
+    end;
+pick_node({dirty, _}, Node, [], Done) ->
+    {#commit{decision = presume_commit, node = Node}, Done};
+pick_node({ec, _}, Node, [], Done) ->
+    {#commit{decision = presume_commit, node = Node}, Done};
+pick_node(_Tid, Node, [], _Done) ->
+    mnesia:abort({bad_commit, {missing_lock, Node}}).
+
+prepare_node(Node, Storage, [Item | Items], #commit{ext = Ext0} = Rec, Kind)
+    when Kind == snmp ->
+    Rec2 =
+        case lists:keytake(snmp, 1, Ext0) of
+            false ->
+                Rec#commit{ext = [{snmp, [Item]} | Ext0]};
+            {_, {snmp, Snmp}, Ext} ->
+                Rec#commit{ext = [{snmp, [Item | Snmp]} | Ext]}
+        end,
+    prepare_node(Node, Storage, Items, Rec2, Kind);
+prepare_node(Node, Storage, [Item | Items], Rec, Kind) when Kind /= schema ->
+    Rec2 =
+        case Storage of
+            ram_copies ->
+                Rec#commit{ram_copies = [Item | Rec#commit.ram_copies]};
+            disc_copies ->
+                Rec#commit{disc_copies = [Item | Rec#commit.disc_copies]};
+            disc_only_copies ->
+                Rec#commit{disc_only_copies = [Item | Rec#commit.disc_only_copies]};
+            {ext, Alias, Mod} ->
+                Ext0 = Rec#commit.ext,
+                case lists:keytake(ext_copies, 1, Ext0) of
+                    false ->
+                        Rec#commit{ext = [{ext_copies, [{{ext, Alias, Mod}, Item}]} | Ext0]};
+                    {_, {_, EC}, Ext} ->
+                        Rec#commit{ext = [{ext_copies, [{{ext, Alias, Mod}, Item} | EC]} | Ext]}
+                end
+        end,
+    prepare_node(Node, Storage, Items, Rec2, Kind);
+prepare_node(_Node, _Storage, Items, Rec, Kind)
+    when Kind == schema, Rec#commit.schema_ops == [] ->
+    Rec#commit{schema_ops = Items};
+prepare_node(_Node, _Storage, [], Rec, _Kind) ->
+    Rec.
+
 
 -spec prepare_ts([#commit{}]) -> [#commit{}].
 prepare_ts(Recs) ->
@@ -426,18 +464,9 @@ do_prepare_ts([Hd | Tl], Node, Ts) ->
     % we only add ts once, since we consider all copies in a commit as a whole
     Commit = Hd#commit{sender = Node, ts = Ts},
     [Commit | do_prepare_ts(Tl, Node, Ts)];
-% Commit1 = Commit#commit{ram_copies = do_update_ts(ram_copies, Commit#commit.ram_copies)},
-% Commit2 =
-%     Commit#commit{disc_copies = do_update_ts(disc_copies, Commit1#commit.disc_copies)},
-% Commit3 =
-%     Commit#commit{disc_only_copies =
-%                       do_update_ts(disc_only_copies, Commit2#commit.disc_only_copies)},
-% Commit4 = Commit#commit{ext = do_update_ts(ext, Commit3#commit.ext)},
-% [Commit4 | do_prepare_ts(Tl, Node)];
 do_prepare_ts([], _Node, _Ts) ->
     [].
 
-% FIX let's only consider ram_copy for now
 do_update_ts(ram_copies, Copy, Ts) ->
     add_time(Copy, Ts);
 do_update_ts(disc_copies, Copy, Ts) ->
@@ -446,14 +475,6 @@ do_update_ts(disc_only_copies, Copy, Ts) ->
     add_time(Copy, Ts);
 do_update_ts({ext, _Alias, _Mod}, ExtCopy, Ts) ->
     add_time(ExtCopy, Ts);
-% {_Node, Ts} = mnesia_causal:send_msg(),
-% case ExtCopies of
-%     [{ext_copies, Copies}] ->
-%         NewExtCopies = [add_time(Copy, Ts) || Copy <- Copies],
-%         [{ext_copies, NewExtCopies}];
-%     Other ->
-%         Other
-% end;
 do_update_ts(Storage, _Copies, _Ts) ->
     mnesia:abort({bad_storage, Storage}).
 
@@ -511,7 +532,7 @@ async_send_ec(Tid, [Head | Tail], Tab, ReadNode, WaitFor, Res) ->
        ReadNode == Node ->
            % if the readnode is not local, we need to send it to the readnode and
            % _wait_ for it, note the sync_ec
-           % this might happen when we are not a mnemis node
+           % this might happen when we are not a mnemia node
            {?MODULE, Node} ! {self(), {sync_ec, Tid, Head, Tab}},
            NewRes = {'EXIT', {aborted, {node_not_running, Node}}},
            async_send_ec(Tid, Tail, Tab, ReadNode, [Node | WaitFor], NewRes);

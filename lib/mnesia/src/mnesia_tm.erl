@@ -26,9 +26,6 @@
          prepare_checkpoint/2, prepare_checkpoint/1, prepare_snmp/3, do_snmp/2, put_activity_id/1,
          put_activity_id/2, block_tab/1, unblock_tab/1, fixtable/3, new_cr_format/1]).
 
--export([prepare_nodes/5, prepare_snmp/7, needs_majority/2, rec_dirty/2, val/1]).
-                               % Internal
-
 %% sys callback functions
 -export([system_continue/3, system_terminate/4, system_code_change/4]).
 
