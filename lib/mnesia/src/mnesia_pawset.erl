@@ -22,59 +22,11 @@ stabiliser_interval() ->
     1000.
 
 val(Var) ->
-    case ?catch_val_and_stack(Var) of
-        {'EXIT', Stacktrace} ->
-            mnesia_lib:other_val(Var, Stacktrace);
-        Value ->
-            Value
-    end.
+    mnesia:val(Var).
 
-is_dollar_digits(Var) ->
-    case atom_to_list(Var) of
-        [$$ | Digs] ->
-            is_digits(Digs);
-        _ ->
-            false
-    end.
+has_var(X) -> 
+    mnesia:has_var(X).
 
-is_digits([Dig | Tail]) ->
-    if $0 =< Dig, Dig =< $9 ->
-           is_digits(Tail);
-       true ->
-           false
-    end;
-is_digits([]) ->
-    true.
-
-has_var(X) when is_atom(X) ->
-    if X == '_' ->
-           true;
-       is_atom(X) ->
-           is_dollar_digits(X);
-       true ->
-           false
-    end;
-has_var(X) when is_tuple(X) ->
-    e_has_var(X, size(X));
-has_var([H | T]) ->
-    case has_var(H) of
-        false ->
-            has_var(T);
-        Other ->
-            Other
-    end;
-has_var(_) ->
-    false.
-
-e_has_var(_, 0) ->
-    false;
-e_has_var(X, Pos) ->
-    case has_var(element(Pos, X)) of
-        false ->
-            e_has_var(X, Pos - 1);
-        Other ->
-            Other
-    end.
 
 mktab(Tab, [{keypos, 2}, public, named_table, Type | EtsOpts])
     when Type =:= pawset orelse Type =:= pawbag ->
@@ -108,7 +60,7 @@ effect(Storage, Tab, Tup) ->
     end.
 
 db_put(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
-    Ts = element(tuple_size(Obj), Obj),
+    Ts = get_ts(Obj),
     dbg_out("running my own insert function and table ~p with val ~p and "
             "ts ~p~n",
             [Tab, Obj, Ts]),
@@ -236,8 +188,8 @@ remote_match_object(Tab, Pat, [Pos | Tail]) when Pos =< tuple_size(Pat) ->
     IxKey = element(Pos, Pat),
     case has_var(IxKey) of
         false ->
-            Pat1 = wild_ts(Pat),
-            mnesia_index:dirty_match_object(Tab, Pat1, Pos);
+            Tups = mnesia_index:dirty_match_object(Tab, wild_ts(Pat), Pos),
+            [remove_ts(Tup) || Tup <- Tups];
         true ->
             remote_match_object(Tab, Pat, Tail)
     end;
@@ -252,13 +204,13 @@ remote_ec_select(Tab, Spec) ->
             Key = element(2, HeadPat),
             case has_var(Key) of
                 false ->
-                    mnesia_lib:db_select(Tab, Spec);
+                    db_select(Tab, Spec);
                 true ->
                     PosList = regular_indexes(Tab),
                     remote_ec_select(Tab, Spec, PosList)
             end;
         _ ->
-            mnesia_lib:db_select(Tab, Spec)
+            db_select(Tab, Spec)
     end.
 
 remote_ec_select(Tab, [{HeadPat, _, _}] = Spec, [Pos | Tail])
@@ -266,16 +218,15 @@ remote_ec_select(Tab, [{HeadPat, _, _}] = Spec, [Pos | Tail])
     Key = element(Pos, HeadPat),
     case has_var(Key) of
         false ->
-            Recs = mnesia_index:dirty_select(Tab, HeadPat, Pos),
-            %% Returns the records without applying the match spec
-            %% The actual filtering is handled by the caller
-            CMS = ets:match_spec_compile(Spec),
+            Recs = mnesia_index:dirty_select(Tab, wild_ts(HeadPat), Pos),
+            Spec2 = [{wild_ts(MatchHead), Guards, Results} || {MatchHead, Guards, Results} <- Spec],
+            CMS = ets:match_spec_compile(Spec2),
             ets:match_spec_run(Recs, CMS);
         true ->
             remote_ec_select(Tab, Spec, Tail)
     end;
 remote_ec_select(Tab, Spec, _) ->
-    mnesia_lib:db_select(Tab, Spec).
+    db_select(Tab, Spec).
 
 regular_indexes(Tab) ->
     PosList = val({Tab, index}),

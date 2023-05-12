@@ -123,7 +123,15 @@ groups() ->
        {mnesia_dirty_access_test,
 	dirty_index_update_set_disc_only},
        {mnesia_evil_coverage_test,
-	create_live_table_index_disc_only}]}].
+	create_live_table_index_disc_only}]},
+    {ec, [], [
+        {mnesia_ec_test, all},
+        {mnesia_causal_test, all},
+        {mnesia_pawset_test, all},
+        {mnesia_prwset_test, all}
+    ]}
+
+].
 
 init_per_group(_GroupName, Config) ->
 	Config.

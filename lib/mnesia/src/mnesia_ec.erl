@@ -31,53 +31,9 @@ val(Var) ->
             Value
     end.
 
-is_dollar_digits(Var) ->
-    case atom_to_list(Var) of
-        [$$ | Digs] ->
-            is_digits(Digs);
-        _ ->
-            false
-    end.
-
-is_digits([Dig | Tail]) ->
-    if $0 =< Dig, Dig =< $9 ->
-           is_digits(Tail);
-       true ->
-           false
-    end;
-is_digits([]) ->
-    true.
-
-has_var(X) when is_atom(X) ->
-    if X == '_' ->
-           true;
-       is_atom(X) ->
-           is_dollar_digits(X);
-       true ->
-           false
-    end;
-has_var(X) when is_tuple(X) ->
-    e_has_var(X, size(X));
-has_var([H | T]) ->
-    case has_var(H) of
-        false ->
-            has_var(T);
-        Other ->
-            Other
-    end;
-has_var(_) ->
-    false.
-
-e_has_var(_, 0) ->
-    false;
-e_has_var(X, Pos) ->
-    case has_var(element(Pos, X)) of
-        false ->
-            e_has_var(X, Pos - 1);
-        Other ->
-            Other
-    end.
-
+has_var(X) ->
+    mnesia:has_var(X).
+    
 start() ->
     mnesia_monitor:start_proc(?MODULE, ?MODULE, init, [self()]).
 
