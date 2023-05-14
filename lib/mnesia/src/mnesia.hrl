@@ -112,7 +112,6 @@
 		 disc_only_copies = [],
 		 ext = [],
 		 schema_ops = [],
-         sender = node(),
          ts = #{}
 		}).
 

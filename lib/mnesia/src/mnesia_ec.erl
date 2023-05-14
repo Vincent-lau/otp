@@ -33,7 +33,7 @@ val(Var) ->
 
 has_var(X) ->
     mnesia:has_var(X).
-    
+
 start() ->
     mnesia_monitor:start_proc(?MODULE, ?MODULE, init, [self()]).
 
@@ -41,7 +41,6 @@ init(Parent) ->
     register(?MODULE, self()),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
-    {APid, ARef} = spawn_acker(no),
     case val(debug) of
         Debug when Debug /= debug, Debug /= trace ->
             ignore;
@@ -49,8 +48,8 @@ init(Parent) ->
             mnesia_subscr:subscribe(whereis(mnesia_event), {table, schema})
     end,
     proc_lib:init_ack(Parent, {ok, self()}),
-    doit_loop(#state{stabiliser = {undefined, undefined},
-                     acker = {APid, ARef},
+    doit_loop(#state{stabiliser = mnesia_pawset:spawn_stabiliser(yes),
+                     acker = spawn_acker(no),
                      supervisor = Parent,
                      reify = false}).
 
@@ -72,7 +71,7 @@ doit_loop(#state{stabiliser = {SPid, SRef},
             send_ack(Commit),
             case lists:member(Tab, State#state.blocked_tabs) of
                 false ->
-                    spawn(fun() -> receive_msg(Tid, Commit, Tab, {rcv, async}, Reify) end),
+                    receive_msg(Tid, Commit, Tab, {rcv, {async, ?MODULE}}, Reify),
                     doit_loop(State);
                 true ->
                     Item = {async_ec, Tid, mnesia_tm:new_cr_format(Commit), Tab},
@@ -90,12 +89,23 @@ doit_loop(#state{stabiliser = {SPid, SRef},
                     State2 = State#state{ec_queue = [Item | State#state.ec_queue]},
                     doit_loop(State2)
             end;
+        {_From, {deliver, Deliverable}} ->
+            dbg_out("found async_ec devliverable commits: ~p~n", [Deliverable]),
+            spawn_monitor(fun () -> lists:foreach(fun({Tid1, Commit1, Tab1}) ->
+                             do_async_ec(Tid1, mnesia_tm:new_cr_format(Commit1), Tab1)
+                          end,
+                          Deliverable) end),
+            doit_loop(State);
         {'EXIT', Pid, Reason} ->
             handle_exit(Pid, Reason, State);
         {'DOWN', SRef, process, SPid, Reason} ->
             handle_exit(SPid, Reason, State);
         {'DOWN', ARef, process, APid, Reason} ->
             handle_exit(APid, Reason, State);
+        {'DOWN', _Ref, process, _Pid, normal} ->
+            doit_loop(State);
+        {'Down', _Ref, process, _Pid, Reason} ->
+            handle_exit(_Pid, Reason, State);
         Msg ->
             verbose("** ERROR ** ~p got unexpected message: ~tp~n", [?MODULE, Msg]),
             doit_loop(State)
@@ -407,20 +417,24 @@ prepare_node(_Node, _Storage, Items, Rec, Kind)
 prepare_node(_Node, _Storage, [], Rec, _Kind) ->
     Rec.
 
-
 -spec prepare_ts([#commit{}]) -> [#commit{}].
 prepare_ts(Recs) ->
-    {Node, Ts} = mnesia_causal:send_msg(),
-    do_prepare_ts(lists:reverse(Recs), Node, Ts).
+    try
+        Ts = mnesia_causal:send_msg(),
+        do_prepare_ts(lists:reverse(Recs), Ts)
+    catch
+        exit:Reason ->
+            warning("causal send msg exited, reason ~p~n", [Reason]),
+            exit(Reason)
+    end.
 
 %% Returns a list of commit record, with node and ts set
--spec do_prepare_ts([#commit{}], node(), mnesia_causal:vclock()) ->
-                       [#commit{sender :: atom()}].
-do_prepare_ts([Hd | Tl], Node, Ts) ->
+-spec do_prepare_ts([#commit{}], mnesia_causal:vclock()) -> [#commit{}].
+do_prepare_ts([Hd | Tl], Ts) ->
     % we only add ts once, since we consider all copies in a commit as a whole
-    Commit = Hd#commit{sender = Node, ts = Ts},
-    [Commit | do_prepare_ts(Tl, Node, Ts)];
-do_prepare_ts([], _Node, _Ts) ->
+    Commit = Hd#commit{ts = Ts},
+    [Commit | do_prepare_ts(Tl, Ts)];
+do_prepare_ts([], _Ts) ->
     [].
 
 do_update_ts(ram_copies, Copy, Ts) ->
@@ -442,16 +456,11 @@ add_time({ExtInfo, {Oid, Val, Op}}, Ts) ->
 receive_msg(Tid, Commit, _Tab, local, _Reify) ->
     mnesia_causal:deliver_one(Commit),
     do_ec(Tid, Commit);
-receive_msg(Tid, Commit, Tab, {rcv, async}, Reify) ->
+receive_msg(Tid, Commit, Tab, {rcv, {async, SendBack}}, Reify) ->
     reify(Tid, Commit, Tab, Reify),
-    Deliverable = mnesia_causal:rcv_msg(Tid, Commit, Tab),
-    dbg_out("found async_ec devliverable commits: ~p~n", [Deliverable]),
-    lists:foreach(fun({Tid1, Commit1, Tab1}) ->
-                     do_async_ec(Tid1, mnesia_tm:new_cr_format(Commit1), Tab1)
-                  end,
-                  Deliverable);
+    ok = mnesia_causal:rcv_msg(Tid, Commit, Tab, {async, SendBack});
 receive_msg(Tid, Commit, Tab, {rcv, {sync, From}}, _Reify) ->
-    Deliverable = mnesia_causal:rcv_msg(Tid, Commit, Tab, From),
+    Deliverable = mnesia_causal:rcv_msg(Tid, Commit, Tab, {sync, From}),
     dbg_out("found sync_ec devliverable commits: ~p~n", [Deliverable]),
     lists:foreach(fun({Tid1, Commit1 = #commit{}, Tab1, From1}) ->
                      do_sync_ec(From1, Tid1, mnesia_tm:new_cr_format(Commit1), Tab1)
@@ -939,11 +948,14 @@ handle_exit(Pid, _Reason, State) when Pid == State#state.supervisor ->
     do_stop(State);
 handle_exit(Pid, Reason, State) when Pid == element(1, State#state.stabiliser) ->
     %% Our stablier has died, time to stop
-    dbg_out("stablier died: ~p~n", [Reason]),
+    dbg_out("stabiliser died: ~p~n", [Reason]),
     do_stop(State);
 handle_exit(Pid, Reason, State) when Pid == element(1, State#state.acker) ->
     %% Our acker has died, time to stop
     dbg_out("acker died: ~p~n", [Reason]),
+    do_stop(State);
+handle_exit(_Pid, Reason, State) ->
+    dbg_out("process died, likely do_async_ec ~p~n", [Reason]),
     do_stop(State).
 
 do_stop(#state{}) ->

@@ -21,12 +21,17 @@
 stabiliser_interval() ->
     1000.
 
+%% Local function in order to avoid external function call
 val(Var) ->
-    mnesia:val(Var).
+    case ?catch_val_and_stack(Var) of
+        {'EXIT', Stacktrace} ->
+            mnesia_lib:other_val(Var, Stacktrace);
+        Value ->
+            Value
+    end.
 
-has_var(X) -> 
+has_var(X) ->
     mnesia:has_var(X).
-
 
 mktab(Tab, [{keypos, 2}, public, named_table, Type | EtsOpts])
     when Type =:= pawset orelse Type =:= pawbag ->
@@ -60,7 +65,7 @@ effect(Storage, Tab, Tup) ->
     end.
 
 db_put(Storage, Tab, Obj) when is_map(element(tuple_size(Obj), Obj)) ->
-    Ts = get_ts(Obj),
+    Ts = get_ts(tuple_size(Obj), Obj),
     dbg_out("running my own insert function and table ~p with val ~p and "
             "ts ~p~n",
             [Tab, Obj, Ts]),
@@ -308,11 +313,10 @@ remove_obsolete(Storage, Tab, Ele) ->
     end.
 
 spawn_stabiliser(no) ->
-    {undefined, undefine};
+    {undefined, undefined};
 spawn_stabiliser(yes) ->
-    {Pid, Ref} = spawn_monitor(fun() -> causal_stabiliser([], []) end),
+    {Pid, Ref} = spawn_monitor(fun() -> causal_stabiliser([]) end),
     register(?MODULE, Pid),
-    ok = mnesia_causal:reg_stabiliser(Pid),
     erlang:send_after(stabiliser_interval(), Pid, stabilise),
     {Pid, Ref}.
 
@@ -324,48 +328,40 @@ notify_stabiliser(Msg) ->
             Pid ! Msg
     end.
 
-causal_stabiliser(Tabs, Ts) ->
+causal_stabiliser(Tabs) ->
     receive
         stabilise ->
-            case node() of
-                'bench2@vincent-pc' ->
-                    io:format("stabilising ~p~n", [Ts]);
-                _ ->
-                    ok
-            end,
-            [stabilise(Tab, Ts) || Tab <- Tabs],
+            % case node() of
+            %     'bench2@vincent-pc' ->
+            %         io:format("stabilising ~n", []);
+            %     _ ->
+            %         ok
+            % end,
+            [stabilise(Tab) || Tab <- Tabs],
             erlang:send_after(stabiliser_interval(), self(), stabilise),
-            causal_stabiliser(Tabs, []);
-        {add_timestamp, T} ->
-            Ts2 = lists:foldl(fun(T1, AccIn) ->
-                                 case mnesia_causal:vclock_leq(T1, T) of
-                                     true -> AccIn;
-                                     false -> [T1 | AccIn]
-                                 end
-                              end,
-                              [],
-                              Ts),
-            causal_stabiliser(Tabs, [T | Ts2]);
+            causal_stabiliser(Tabs);
         {add_table, Tab} ->
-            causal_stabiliser([Tab | Tabs], Ts);
+            causal_stabiliser([Tab | Tabs]);
         Unexpected ->
             error({unexpected, Unexpected})
     end.
 
-stabilise(Tab, Ts) ->
+stabilise(Tab) ->
     mnesia_lib:db_fixtable(val({Tab, storage_type}), Tab, true),
-    do_stabilise(Tab, Ts, mnesia_lib:db_first(Tab)),
+    do_stabilise(Tab, mnesia_lib:db_first(Tab)),
     mnesia_lib:db_fixtable(val({Tab, storage_type}), Tab, false).
 
-do_stabilise(_Tab, _Ts, '$end_of_table') ->
+do_stabilise(_Tab, '$end_of_table') ->
     ok;
-do_stabilise(Tab, Ts, Key) ->
+do_stabilise(Tab, Key) ->
     Tups = mnesia_lib:db_get(Tab, Key),
     Tups2 =
         lists:map(fun(Tup) ->
-                     T1 = get_ts(tuple_size(Tup), Tup),
-                     case lists:any(fun(T) -> mnesia_causal:vclock_leq(T1, T) end, Ts) of
-                         true -> set_ts(Tup, mnesia_causal:bot(), tuple_size(Tup));
+                     T = get_ts(tuple_size(Tup), Tup),
+                     case not mnesia_causal:is_bot(T) andalso mnesia_causal:tcstable(T) of
+                         true ->
+                            %  io:format("stabilising ~p~n", [T]),
+                             set_ts(Tup, mnesia_causal:bot(), tuple_size(Tup));
                          false -> Tup
                      end
                   end,
@@ -373,7 +369,7 @@ do_stabilise(Tab, Ts, Key) ->
     NextKey = mnesia_lib:db_next_key(Tab, Key),
     mnesia_lib:db_erase(Tab, Key),
     mnesia_lib:db_put(Tab, Tups2),
-    do_stabilise(Tab, Ts, NextKey).
+    do_stabilise(Tab, NextKey).
 
 key_pos(Tab) ->
     case val({Tab, storage_type}) of

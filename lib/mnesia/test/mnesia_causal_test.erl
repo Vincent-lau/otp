@@ -6,7 +6,7 @@
 
 -export([init_per_testcase/2, end_per_testcase/2, init_per_group/2, end_per_group/2,
          all/0, groups/0]).
--export([empty_final_buffer_ram/1, causal_stability/1, causal_stable_receiver/1]).
+-export([empty_final_buffer_ram/1, causal_stability_basic/1, causal_stability_more/1]).
 
 init_per_testcase(Func, Conf) ->
     mnesia_test_lib:init_per_testcase(Func, Conf).
@@ -16,13 +16,10 @@ end_per_testcase(Func, Conf) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 all() ->
-    [{group, causal_consistency},
-     empty_final_buffer_ram,
-     causal_stability].
-    %  causal_stable_receiver].
+    [empty_final_buffer_ram, {group, causal_stability}].
 
 groups() ->
-    [{causal_consistency, [], []}].
+    [{causal_stability, [], [causal_stability_basic, causal_stability_more]}].
 
 init_per_group(_GroupName, Config) ->
     Config.
@@ -48,8 +45,14 @@ empty_final_buffer(Config, Storage) ->
                               Writer(2, a),
                               Writer(1, a)
                            end)),
-    spawn_monitor(NodeA1, mnesia, async_ec, [fun() -> [Writer(N, a) || N <- lists:seq(3, 10)] end]),
-    spawn_monitor(NodeA1, mnesia, async_ec, [fun() -> [Writer(N, b) || N <- lists:seq(12, 20)] end]),
+    spawn_monitor(NodeA1,
+                  mnesia,
+                  async_ec,
+                  [fun() -> [Writer(N, a) || N <- lists:seq(3, 10)] end]),
+    spawn_monitor(NodeA1,
+                  mnesia,
+                  async_ec,
+                  [fun() -> [Writer(N, b) || N <- lists:seq(12, 20)] end]),
 
     timer:sleep(3000),
 
@@ -59,9 +62,9 @@ empty_final_buffer(Config, Storage) ->
 
     ?verify_mnesia(Nodes, []).
 
-causal_stability(suite) ->
+causal_stability_basic(suite) ->
     [];
-causal_stability(Config) when is_list(Config) ->
+causal_stability_basic(Config) when is_list(Config) ->
     Nodes = [NodeA, NodeA1, NodeA2] = ?acquire_nodes(3, Config),
     Tab = causal_stability,
     Def = [{ram_copies, Nodes}, {type, pawset}, {attributes, [k, v]}],
@@ -75,17 +78,17 @@ causal_stability(Config) when is_list(Config) ->
     ?match(true,
            mnesia_causal:tcstable(#{NodeA => 1,
                                     NodeA1 => 0,
-                                    NodeA2 => 0},
-                                  NodeA)).
+                                    NodeA2 => 0,
+                                    sender => NodeA}
+                                  )).
 
-causal_stable_receiver(suite) ->
+causal_stability_more(suite) ->
     [];
-causal_stable_receiver(Config) when is_list(Config) ->
+causal_stability_more(Config) when is_list(Config) ->
     Nodes = [NodeA, NodeA1, NodeA2] = ?acquire_nodes(3, Config),
     Tab = causal_stable_receiver,
     Def = [{ram_copies, Nodes}, {type, pawset}, {attributes, [k, v]}],
     ?match({atomic, ok}, mnesia:create_table(Tab, Def)),
-    mnesia_causal:reg_stabiliser(self()),
     ?match(ok, mnesia:activity(sync_ec, fun() -> mnesia:write({Tab, 1, a}) end)),
     spawn(NodeA1, mnesia, sync_ec, [fun() -> mnesia:write({Tab, 2, a}) end]),
     spawn(NodeA2, mnesia, sync_ec, [fun() -> mnesia:write({Tab, 3, a}) end]),
@@ -100,30 +103,21 @@ causal_stable_receiver(Config) when is_list(Config) ->
     ?match([{Tab, 4, a}], mnesia:sync_ec(fun() -> mnesia:read({Tab, 4}) end)),
     ?match([{Tab, 6, a}], mnesia:sync_ec(fun() -> mnesia:read({Tab, 6}) end)),
 
-    ExpectedTs =
-        [#{NodeA => 1,
-           NodeA1 => 0,
-           NodeA2 => 0},
-         #{NodeA => 1,
-           NodeA1 => 1,
-           NodeA2 => 0},
-         #{NodeA => 1,
-           NodeA1 => 0,
-           NodeA2 => 1}],
-    check_received_ts(ExpectedTs).
+    ?match(true,
+           mnesia_causal:tcstable(#{NodeA => 1,
+                                    NodeA1 => 0,
+                                    NodeA2 => 0,
+                                    sender => NodeA})),
+    ?match(true,
+           mnesia_causal:tcstable(#{NodeA => 1,
+                                    NodeA1 => 1,
+                                    NodeA2 => 0,
+                                    sender => NodeA}
+                                  )),
 
-check_received_ts([]) ->
-    ok;
-check_received_ts(Ts) ->
-    receive
-        {add_timestamp, RT} ->
-            ?log("stable_ts: ~p, expected list ~p~n", [RT, Ts]),
-            % ?log("server mrd: ~p~n", [mnesia_causal:get_mrd()]),
-            ?match(true, lists:member(RT, Ts)),
-            check_received_ts(Ts -- [RT]);
-        Unexpected ->
-            ?log("Unexpected: ~p~n", [Unexpected]),
-            ?match(true, false)
-    after 5000 ->
-        ?match(true, false)
-    end.
+    ?match(true,
+           mnesia_causal:tcstable(#{NodeA => 1,
+                                    NodeA1 => 0,
+                                    NodeA2 => 1,
+                                    sender => NodeA}
+                                  )).
