@@ -944,7 +944,7 @@ display_table_stats(C, Tables) ->
 do_display_table_stats(_C, []) ->
     ok;
 do_display_table_stats(C, [Tab | Tables]) ->
-    {Bytes, []} = rpc:multicall([node() | C#config.table_nodes], mnesia, table_info, [Tab, memory]),
+    {Bytes, []} = rpc:multicall(C#config.table_nodes, mnesia, table_info, [Tab, memory]),
     Bytes2 = [B * 4 || B <- Bytes],
     ?d("    ~p table size totally ~p bytes.~n", [Tab, Bytes2]),
     do_display_table_stats(C, Tables).

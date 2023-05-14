@@ -59,7 +59,7 @@ bind_schedulers() ->
 %%   - Calculate benchmark statistics
 %%   - Stop the temporary Erlang nodes
 run() ->
-    FileName = "bench.config",
+    FileName = "bench0.config",
     run([FileName]).
 
 run(Args) ->
