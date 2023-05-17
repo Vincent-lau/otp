@@ -1,6 +1,7 @@
 #!/bin/zsh
 
 ERL_TOP=~/proj/otp
+ERL_COMPILE_FLAGS="-Ddebug"
 TYPE=debug
 top="$ERL_TOP/lib/mnesia"
 h=`hostname`
