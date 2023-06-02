@@ -49,7 +49,7 @@ init(Parent) ->
     end,
     proc_lib:init_ack(Parent, {ok, self()}),
     doit_loop(#state{stabiliser = mnesia_pawset:spawn_stabiliser(yes),
-                     acker = spawn_acker(no),
+                     acker = spawn_acker(yes),
                      supervisor = Parent,
                      reify = false}).
 
@@ -309,8 +309,9 @@ prepare_items(Tid, Tab, Key, Items, Prep) when Prep#prep.prev_tab == Tab ->
     Recs2 = do_prepare_items(Tid, Tab, Key, Types, Snmp, Items, Recs),
     Prep#prep{records = Recs2};
 prepare_items(Tid, Tab, Key, Items, Prep) ->
-    Types = val({Tab, where_to_commit}),
-    % mnesia_schema:where_to_commit(Tab, mnesia_schema:get_table_properties(Tab)),
+    % Types = val({Tab, where_to_commit}),
+    % Types = val({Tab, copy_holders}),
+    Types = mnesia_schema:where_to_commit(Tab, mnesia_schema:get_table_properties(Tab)),
     case Types of
         [] ->
             mnesia:abort({no_exists, Tab});

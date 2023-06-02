@@ -181,6 +181,10 @@ handle_system_event({inconsistent_database, Reason, Node}, State) ->
 		 [Reason, Node]),
     {ok, State}; 
 
+handle_system_event({repair_inconsistency, Reason, Node}, State) ->
+    report_info("mnesia_event got {repair_inconsistency, ~tw, ~w}~n", [Reason, Node]),
+    {ok, State};
+
 handle_system_event({mnesia_user, Event}, State) ->
     report_info("User event: ~tp~n", [Event]),
     {ok, State}; 
