@@ -1,5 +1,26 @@
 # [Erlang/OTP](https://www.erlang.org)
 
+-------------------------------------
+
+## New modules added by this fork
+
+
+The main modules added by Hypermnesia include `mnesia_ec` as a new `mnesia_access`
+behaviour, `mnesia_causal` for causal broadcast as a `gen_server`, `mnesia_pawset`
+and `mnesia_prwset` for the pure op-based add-wins and remove-wins set implementation.
+
+There are also extensions in the test suite for these newly added modules, such
+as `mnesia_ec_test` for e2e testing on the eventual consistency API.
+And additional benchmarks are added for dirty and ec operations in addition to
+the existing transactions.
+
+
+
+The rest of the README is from the original OTP repo.
+
+-------------------------------------
+
+
 **Erlang** is a programming language and runtime system for building massively scalable soft real-time systems with requirements on high availability. 
 
 **OTP** is a set of Erlang libraries, which consists of the Erlang runtime system, a number of ready-to-use components mainly written in Erlang, and a set of design principles for Erlang programs. [Learn more about Erlang and OTP](http://erlang.org/doc/system_architecture_intro/sys_arch_intro.html).
