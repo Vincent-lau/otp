@@ -15,7 +15,7 @@ ERL_TOP=~/proj/otp
 cd $ERL_TOP && make mnesia && \
 cd $ERL_TOP/lib/mnesia/examples/bench && make && \
 if [ $# -eq 0 ] ; then
-    $ERL_TOP/bin/erl $args
+    $ERL_TOP/bin/erl $args -s observer start -s bench run -s erlang halt
 else
   while [ $# -gt 0 ]; do
     $ERL_TOP/bin/erl $args -s bench run $1 -s erlang halt
